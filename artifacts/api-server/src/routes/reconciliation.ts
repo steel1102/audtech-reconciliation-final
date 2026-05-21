@@ -13,6 +13,7 @@ interface LedgerRow {
 }
 
 type ReconciliationStatus = "matched" | "mismatched" | "missing_current" | "missing_prior" | "possible_regroup";
+type MatchStrategy = "exact_code" | "exact_name" | "ratio" | "partial" | "token_sort" | "token_set";
 
 interface ReconciliationRow {
   status: ReconciliationStatus;
@@ -23,6 +24,7 @@ interface ReconciliationRow {
   variance: number;
   matchScore: number | null;
   matchedWith: string | null;
+  matchStrategy: MatchStrategy | null;
 }
 
 interface ReconciliationSummary {
@@ -149,17 +151,19 @@ function tokenSetRatio(a: string, b: string): number {
   return Math.max(ratio(t1, t2), ratio(t1, t3), ratio(t2, t3));
 }
 
-function fuzzyScore(a: string, b: string): number {
+function fuzzyScore(a: string, b: string): { score: number; strategy: MatchStrategy } {
   const na = normalize(a);
   const nb = normalize(b);
-  if (na === nb) return 100;
-  if (!na || !nb) return 0;
-  return Math.max(
-    ratio(na, nb),
-    partialRatio(na, nb),
-    tokenSortRatio(a, b),
-    tokenSetRatio(a, b),
-  );
+  if (na === nb) return { score: 100, strategy: "ratio" };
+  if (!na || !nb) return { score: 0, strategy: "ratio" };
+
+  const candidates: { score: number; strategy: MatchStrategy }[] = [
+    { score: ratio(na, nb),         strategy: "ratio" },
+    { score: partialRatio(na, nb),  strategy: "partial" },
+    { score: tokenSortRatio(a, b),  strategy: "token_sort" },
+    { score: tokenSetRatio(a, b),   strategy: "token_set" },
+  ];
+  return candidates.reduce((best, c) => (c.score > best.score ? c : best));
 }
 
 const SCORE_HIGH = 95;
@@ -183,6 +187,7 @@ function reconcile(prior: LedgerRow[], current: LedgerRow[]): ReconciliationRow[
         variance,
         matchScore: 100,
         matchedWith: null,
+        matchStrategy: "exact_code",
       });
       continue;
     }
@@ -202,13 +207,14 @@ function reconcile(prior: LedgerRow[], current: LedgerRow[]): ReconciliationRow[
         variance,
         matchScore: 100,
         matchedWith: exactName.ledgerCode !== p.ledgerCode ? exactName.ledgerCode : null,
+        matchStrategy: "exact_name",
       });
       continue;
     }
 
     const candidates = current
       .filter((c) => !matchedCurrentCodes.has(c.ledgerCode))
-      .map((c) => ({ c, score: fuzzyScore(p.ledgerName, c.ledgerName) }))
+      .map((c) => { const f = fuzzyScore(p.ledgerName, c.ledgerName); return { c, score: f.score, strategy: f.strategy }; })
       .filter((x) => x.score >= SCORE_REGROUP)
       .sort((a, b) => b.score - a.score);
 
@@ -227,6 +233,7 @@ function reconcile(prior: LedgerRow[], current: LedgerRow[]): ReconciliationRow[
           variance,
           matchScore: best.score,
           matchedWith: best.c.ledgerCode !== p.ledgerCode ? best.c.ledgerCode : null,
+          matchStrategy: best.strategy,
         });
       } else {
         results.push({
@@ -238,6 +245,7 @@ function reconcile(prior: LedgerRow[], current: LedgerRow[]): ReconciliationRow[
           variance,
           matchScore: best.score,
           matchedWith: best.c.ledgerCode,
+          matchStrategy: best.strategy,
         });
       }
     } else {
@@ -250,6 +258,7 @@ function reconcile(prior: LedgerRow[], current: LedgerRow[]): ReconciliationRow[
         variance: -p.balance,
         matchScore: null,
         matchedWith: null,
+        matchStrategy: null,
       });
     }
   }
@@ -265,6 +274,7 @@ function reconcile(prior: LedgerRow[], current: LedgerRow[]): ReconciliationRow[
         variance: c.balance,
         matchScore: null,
         matchedWith: null,
+        matchStrategy: null,
       });
     }
   }

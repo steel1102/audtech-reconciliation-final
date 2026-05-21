@@ -7,6 +7,7 @@ import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { cn } from "@/lib/utils";
 
 type ReconciliationStatus = "matched" | "mismatched" | "missing_current" | "missing_prior" | "possible_regroup";
+type MatchStrategy = "exact_code" | "exact_name" | "ratio" | "partial" | "token_sort" | "token_set";
 
 interface ReconciliationRow {
   status: ReconciliationStatus;
@@ -17,6 +18,7 @@ interface ReconciliationRow {
   variance: number;
   matchScore: number | null;
   matchedWith: string | null;
+  matchStrategy: MatchStrategy | null;
 }
 
 interface ReconciliationSummary {
@@ -56,6 +58,50 @@ function StatusBadge({ status }: { status: ReconciliationStatus }) {
       {cfg.icon}
       {cfg.label}
     </span>
+  );
+}
+
+const STRATEGY_LABELS: Record<MatchStrategy, string> = {
+  exact_code:  "Exact Code",
+  exact_name:  "Exact Name",
+  ratio:       "Char Similarity",
+  partial:     "Partial Match",
+  token_sort:  "Word Order",
+  token_set:   "Word Set",
+};
+
+function ConfidenceBand({ score, strategy }: { score: number | null; strategy: MatchStrategy | null }) {
+  if (score === null) return <span className="text-muted-foreground text-xs">—</span>;
+
+  const pct = score;
+  const barColor =
+    pct === 100 ? "bg-green-500" :
+    pct >= 95   ? "bg-green-400" :
+    pct >= 80   ? "bg-amber-400" :
+                  "bg-violet-400";
+
+  const textColor =
+    pct === 100 ? "text-green-700" :
+    pct >= 95   ? "text-green-600" :
+    pct >= 80   ? "text-amber-600" :
+                  "text-violet-600";
+
+  return (
+    <div className="flex flex-col items-end gap-1 min-w-[96px]">
+      <div className="flex items-center gap-1.5 w-full justify-end">
+        <div className="flex-1 h-1.5 rounded-full bg-muted overflow-hidden">
+          <div className={cn("h-full rounded-full transition-all", barColor)} style={{ width: `${pct}%` }} />
+        </div>
+        <span className={cn("text-xs font-semibold tabular-nums w-8 text-right", textColor)}>
+          {pct}%
+        </span>
+      </div>
+      {strategy && strategy !== "exact_code" && strategy !== "exact_name" && (
+        <span className="text-[10px] text-muted-foreground font-medium leading-none">
+          {STRATEGY_LABELS[strategy]}
+        </span>
+      )}
+    </div>
   );
 }
 
@@ -449,7 +495,7 @@ export default function Reconciliation() {
                           ["priorBalance", "Prior Year Balance"],
                           ["currentBalance", "CY Opening Balance"],
                           ["variance", "Variance"],
-                          ["matchScore", "Match %"],
+                          ["matchScore", "Confidence"],
                         ] as [SortField, string][]).map(([field, label]) => (
                           <th
                             key={field}
@@ -489,8 +535,8 @@ export default function Reconciliation() {
                           )}>
                             {row.variance > 0 ? "+" : ""}{fmt(row.variance)}
                           </td>
-                          <td className="px-4 py-2.5 text-right text-xs text-muted-foreground">
-                            {row.matchScore != null ? `${row.matchScore}%` : "—"}
+                          <td className="px-4 py-2.5">
+                            <ConfidenceBand score={row.matchScore} strategy={row.matchStrategy} />
                           </td>
                         </tr>
                       ))}
