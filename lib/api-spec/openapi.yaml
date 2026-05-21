@@ -3,13 +3,15 @@ info:
   # Do not change the title, if the title changes, the import paths will be broken
   title: Api
   version: 0.1.0
-  description: API specification
+  description: Audtech Reconciliation API
 servers:
   - url: /api
     description: Base API path
 tags:
   - name: health
     description: Health operations
+  - name: reconciliation
+    description: Reconciliation operations
 paths:
   /healthz:
     get:
@@ -24,6 +26,33 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/HealthStatus"
+
+  /reconciliation/result:
+    get:
+      operationId: getReconciliationResult
+      tags: [reconciliation]
+      summary: Get last reconciliation result
+      responses:
+        "200":
+          description: Last reconciliation result or empty
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ReconciliationResult"
+
+  /reconciliation/summary:
+    get:
+      operationId: getReconciliationSummary
+      tags: [reconciliation]
+      summary: Get reconciliation summary stats
+      responses:
+        "200":
+          description: Summary stats
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ReconciliationSummary"
+
 components:
   schemas:
     HealthStatus:
@@ -34,3 +63,63 @@ components:
       required:
         - status
 
+    ErrorResponse:
+      type: object
+      required: [error]
+      properties:
+        error:
+          type: string
+
+    ReconciliationRow:
+      type: object
+      required: [status, ledgerCode, ledgerName, priorBalance, currentBalance, variance]
+      properties:
+        status:
+          type: string
+          enum: [matched, mismatched, missing_current, missing_prior, possible_regroup]
+        ledgerCode:
+          type: string
+        ledgerName:
+          type: string
+        priorBalance:
+          type: number
+        currentBalance:
+          type: number
+        variance:
+          type: number
+        matchScore:
+          type: ["number", "null"]
+        matchedWith:
+          type: ["string", "null"]
+
+    ReconciliationSummary:
+      type: object
+      required: [totalPrior, totalCurrent, matchedCount, mismatchedCount, missingCurrentCount, missingPriorCount, possibleRegroupCount, totalVariance]
+      properties:
+        totalPrior:
+          type: number
+        totalCurrent:
+          type: number
+        matchedCount:
+          type: integer
+        mismatchedCount:
+          type: integer
+        missingCurrentCount:
+          type: integer
+        missingPriorCount:
+          type: integer
+        possibleRegroupCount:
+          type: integer
+        totalVariance:
+          type: number
+
+    ReconciliationResult:
+      type: object
+      required: [summary, rows]
+      properties:
+        summary:
+          $ref: "#/components/schemas/ReconciliationSummary"
+        rows:
+          type: array
+          items:
+            $ref: "#/components/schemas/ReconciliationRow"
