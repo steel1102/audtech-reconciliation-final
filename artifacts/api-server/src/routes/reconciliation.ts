@@ -191,6 +191,29 @@ function fuzzyScore(a: string, b: string): { score: number; strategy: MatchStrat
 const SCORE_HIGH = 95;
 const SCORE_REGROUP = 70;
 
+// Self-test at module load — shows exact scores in server log
+{
+  const a = "Trade Receivables";
+  const b = "Trade Receivable - Local";
+  const na = normalize(a), nb = normalize(b);
+  const sa = normalizedStemmed(a), sb = normalizedStemmed(b);
+  const r   = ratio(na, nb);
+  const pr  = partialRatio(na, nb);
+  const rs  = ratio(sa, sb);
+  const prs = partialRatio(sa, sb);
+  const tsr = tokenSortRatio(a, b);
+  const tse = tokenSetRatio(a, b);
+  const best = fuzzyScore(a, b);
+  logger.info({
+    test: "Trade Receivables vs Trade Receivable - Local",
+    na, nb, sa, sb,
+    ratio: r, partialRatio: pr,
+    ratioStemmed: rs, partialRatioStemmed: prs,
+    tokenSortRatio: tsr, tokenSetRatio: tse,
+    best,
+  }, "FUZZY_SELF_TEST");
+}
+
 function reconcile(prior: LedgerRow[], current: LedgerRow[]): ReconciliationRow[] {
   const results: ReconciliationRow[] = [];
   // Track by index — ledger codes are often empty or duplicated, so code-based
@@ -277,6 +300,14 @@ function reconcile(prior: LedgerRow[], current: LedgerRow[]): ReconciliationRow[
         });
       }
     } else {
+      // Log top-3 near-miss scores so we can diagnose low-score misses
+      const topMisses = current
+        .map((c, i) => ({ name: c.ledgerName, code: c.ledgerCode, i, ...fuzzyScore(p.ledgerName, c.ledgerName) }))
+        .filter((x) => !matchedCurrentIdx.has(x.i))
+        .sort((a, b) => b.score - a.score)
+        .slice(0, 3)
+        .map((x) => ({ name: x.name, score: x.score, strategy: x.strategy }));
+      logger.info({ priorName: p.ledgerName, priorCode: p.ledgerCode, topMisses }, "UNMATCHED_ENTRY");
       results.push({
         status: "missing_current",
         ledgerCode: p.ledgerCode,
