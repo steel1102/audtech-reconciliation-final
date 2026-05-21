@@ -84,7 +84,27 @@ function parseWorkbook(buffer: Buffer): LedgerRow[] {
 }
 
 function normalize(s: string): string {
-  return s.toLowerCase().replace(/[^a-z0-9]/g, " ").replace(/\s+/g, " ").trim();
+  return s
+    .toLowerCase()
+    .replace(/-+/g, " ")
+    .replace(/[^a-z0-9]/g, " ")
+    .replace(/\s+/g, " ")
+    .trim();
+}
+
+function stem(word: string): string {
+  if (word.length > 5 && word.endsWith("ies")) return word.slice(0, -3) + "y";
+  if (word.length > 5 && word.endsWith("es") && !word.endsWith("ss")) return word.slice(0, -2);
+  if (word.length > 4 && word.endsWith("s") && !word.endsWith("ss")) return word.slice(0, -1);
+  return word;
+}
+
+function normalizedTokens(s: string): string[] {
+  return normalize(s).split(" ").filter(Boolean).map(stem);
+}
+
+function normalizedStemmed(s: string): string {
+  return normalizedTokens(s).join(" ");
 }
 
 function levenshtein(a: string, b: string): number {
@@ -136,10 +156,8 @@ function tokenSortRatio(a: string, b: string): number {
 }
 
 function tokenSetRatio(a: string, b: string): number {
-  const na = normalize(a);
-  const nb = normalize(b);
-  const tokA = na.split(" ").filter(Boolean);
-  const tokB = nb.split(" ").filter(Boolean);
+  const tokA = normalizedTokens(a);
+  const tokB = normalizedTokens(b);
   const setA = new Set(tokA);
   const setB = new Set(tokB);
   const intersection = [...setA].filter((t) => setB.has(t)).sort().join(" ");
@@ -154,12 +172,16 @@ function tokenSetRatio(a: string, b: string): number {
 function fuzzyScore(a: string, b: string): { score: number; strategy: MatchStrategy } {
   const na = normalize(a);
   const nb = normalize(b);
+  const sa = normalizedStemmed(a);
+  const sb = normalizedStemmed(b);
   if (na === nb) return { score: 100, strategy: "ratio" };
   if (!na || !nb) return { score: 0, strategy: "ratio" };
 
   const candidates: { score: number; strategy: MatchStrategy }[] = [
     { score: ratio(na, nb),         strategy: "ratio" },
     { score: partialRatio(na, nb),  strategy: "partial" },
+    { score: ratio(sa, sb),         strategy: "ratio" },
+    { score: partialRatio(sa, sb),  strategy: "partial" },
     { score: tokenSortRatio(a, b),  strategy: "token_sort" },
     { score: tokenSetRatio(a, b),   strategy: "token_set" },
   ];
@@ -171,12 +193,18 @@ const SCORE_REGROUP = 70;
 
 function reconcile(prior: LedgerRow[], current: LedgerRow[]): ReconciliationRow[] {
   const results: ReconciliationRow[] = [];
-  const matchedCurrentCodes = new Set<string>();
+  // Track by index — ledger codes are often empty or duplicated, so code-based
+  // tracking would silently block valid candidates sharing the same code.
+  const matchedCurrentIdx = new Set<number>();
 
   for (const p of prior) {
-    const exact = current.find((c) => c.ledgerCode === p.ledgerCode && p.ledgerCode !== "");
-    if (exact) {
-      matchedCurrentCodes.add(exact.ledgerCode);
+    const exactIdx = p.ledgerCode !== ""
+      ? current.findIndex((c, i) => c.ledgerCode === p.ledgerCode && !matchedCurrentIdx.has(i))
+      : -1;
+
+    if (exactIdx !== -1) {
+      const exact = current[exactIdx];
+      matchedCurrentIdx.add(exactIdx);
       const variance = exact.balance - p.balance;
       results.push({
         status: Math.abs(variance) < 0.005 ? "matched" : "mismatched",
@@ -192,11 +220,12 @@ function reconcile(prior: LedgerRow[], current: LedgerRow[]): ReconciliationRow[
       continue;
     }
 
-    const exactName = current.find(
-      (c) => normalize(c.ledgerName) === normalize(p.ledgerName) && !matchedCurrentCodes.has(c.ledgerCode)
+    const exactNameIdx = current.findIndex(
+      (c, i) => normalize(c.ledgerName) === normalize(p.ledgerName) && !matchedCurrentIdx.has(i)
     );
-    if (exactName) {
-      matchedCurrentCodes.add(exactName.ledgerCode);
+    if (exactNameIdx !== -1) {
+      const exactName = current[exactNameIdx];
+      matchedCurrentIdx.add(exactNameIdx);
       const variance = exactName.balance - p.balance;
       results.push({
         status: Math.abs(variance) < 0.005 ? "matched" : "mismatched",
@@ -213,14 +242,13 @@ function reconcile(prior: LedgerRow[], current: LedgerRow[]): ReconciliationRow[
     }
 
     const candidates = current
-      .filter((c) => !matchedCurrentCodes.has(c.ledgerCode))
-      .map((c) => { const f = fuzzyScore(p.ledgerName, c.ledgerName); return { c, score: f.score, strategy: f.strategy }; })
-      .filter((x) => x.score >= SCORE_REGROUP)
+      .map((c, i) => ({ c, i, ...fuzzyScore(p.ledgerName, c.ledgerName) }))
+      .filter((x) => !matchedCurrentIdx.has(x.i) && x.score >= SCORE_REGROUP)
       .sort((a, b) => b.score - a.score);
 
     if (candidates.length > 0) {
       const best = candidates[0];
-      matchedCurrentCodes.add(best.c.ledgerCode);
+      matchedCurrentIdx.add(best.i);
       const variance = best.c.balance - p.balance;
 
       if (best.score >= SCORE_HIGH) {
@@ -244,7 +272,7 @@ function reconcile(prior: LedgerRow[], current: LedgerRow[]): ReconciliationRow[
           currentBalance: best.c.balance,
           variance,
           matchScore: best.score,
-          matchedWith: best.c.ledgerCode,
+          matchedWith: best.c.ledgerCode || best.c.ledgerName,
           matchStrategy: best.strategy,
         });
       }
@@ -263,8 +291,8 @@ function reconcile(prior: LedgerRow[], current: LedgerRow[]): ReconciliationRow[
     }
   }
 
-  for (const c of current) {
-    if (!matchedCurrentCodes.has(c.ledgerCode)) {
+  for (const [i, c] of current.entries()) {
+    if (!matchedCurrentIdx.has(i)) {
       results.push({
         status: "missing_prior",
         ledgerCode: c.ledgerCode,
