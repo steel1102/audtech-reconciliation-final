@@ -85,27 +85,87 @@ function normalize(s: string): string {
   return s.toLowerCase().replace(/[^a-z0-9]/g, " ").replace(/\s+/g, " ").trim();
 }
 
+function levenshtein(a: string, b: string): number {
+  const m = a.length;
+  const n = b.length;
+  const prev: number[] = Array.from({ length: n + 1 }, (_, j) => j);
+  const curr: number[] = new Array(n + 1).fill(0);
+  for (let i = 1; i <= m; i++) {
+    curr[0] = i;
+    for (let j = 1; j <= n; j++) {
+      curr[j] =
+        a[i - 1] === b[j - 1]
+          ? prev[j - 1]
+          : 1 + Math.min(prev[j], curr[j - 1], prev[j - 1]);
+    }
+    prev.splice(0, n + 1, ...curr);
+  }
+  return prev[n];
+}
+
+function ratio(a: string, b: string): number {
+  if (a === b) return 100;
+  if (!a || !b) return 0;
+  const dist = levenshtein(a, b);
+  const total = a.length + b.length;
+  return Math.round(((total - dist) / total) * 100);
+}
+
+function partialRatio(a: string, b: string): number {
+  if (a === b) return 100;
+  if (!a || !b) return 0;
+  const shorter = a.length <= b.length ? a : b;
+  const longer = a.length > b.length ? a : b;
+  if (shorter.length === 0) return 0;
+  let best = 0;
+  for (let i = 0; i <= longer.length - shorter.length; i++) {
+    const window = longer.slice(i, i + shorter.length);
+    const s = ratio(shorter, window);
+    if (s > best) best = s;
+    if (best === 100) break;
+  }
+  return best;
+}
+
+function tokenSortRatio(a: string, b: string): number {
+  const sortedA = normalize(a).split(" ").filter(Boolean).sort().join(" ");
+  const sortedB = normalize(b).split(" ").filter(Boolean).sort().join(" ");
+  return ratio(sortedA, sortedB);
+}
+
+function tokenSetRatio(a: string, b: string): number {
+  const na = normalize(a);
+  const nb = normalize(b);
+  const tokA = na.split(" ").filter(Boolean);
+  const tokB = nb.split(" ").filter(Boolean);
+  const setA = new Set(tokA);
+  const setB = new Set(tokB);
+  const intersection = [...setA].filter((t) => setB.has(t)).sort().join(" ");
+  const onlyA = [...setA].filter((t) => !setB.has(t)).sort().join(" ");
+  const onlyB = [...setB].filter((t) => !setA.has(t)).sort().join(" ");
+  const t1 = intersection;
+  const t2 = [intersection, onlyA].filter(Boolean).join(" ");
+  const t3 = [intersection, onlyB].filter(Boolean).join(" ");
+  return Math.max(ratio(t1, t2), ratio(t1, t3), ratio(t2, t3));
+}
+
 function fuzzyScore(a: string, b: string): number {
   const na = normalize(a);
   const nb = normalize(b);
   if (na === nb) return 100;
-
-  const wordsA = new Set(na.split(" ").filter(Boolean));
-  const wordsB = new Set(nb.split(" ").filter(Boolean));
-  const intersection = [...wordsA].filter((w) => wordsB.has(w)).length;
-  const union = new Set([...wordsA, ...wordsB]).size;
-  if (union === 0) return 0;
-  const jaccard = intersection / union;
-
-  const shorter = na.length < nb.length ? na : nb;
-  const longer = na.length >= nb.length ? na : nb;
-  const containsBonus = longer.includes(shorter) ? 0.2 : 0;
-
-  return Math.min(100, Math.round((jaccard + containsBonus) * 100));
+  if (!na || !nb) return 0;
+  return Math.max(
+    ratio(na, nb),
+    partialRatio(na, nb),
+    tokenSortRatio(a, b),
+    tokenSetRatio(a, b),
+  );
 }
 
+const SCORE_HIGH = 95;
+const SCORE_REGROUP = 70;
+
 function reconcile(prior: LedgerRow[], current: LedgerRow[]): ReconciliationRow[] {
-  const FUZZY_THRESHOLD = 60;
   const results: ReconciliationRow[] = [];
   const matchedCurrentCodes = new Set<string>();
 
@@ -149,23 +209,37 @@ function reconcile(prior: LedgerRow[], current: LedgerRow[]): ReconciliationRow[
     const candidates = current
       .filter((c) => !matchedCurrentCodes.has(c.ledgerCode))
       .map((c) => ({ c, score: fuzzyScore(p.ledgerName, c.ledgerName) }))
-      .filter((x) => x.score >= FUZZY_THRESHOLD)
+      .filter((x) => x.score >= SCORE_REGROUP)
       .sort((a, b) => b.score - a.score);
 
     if (candidates.length > 0) {
       const best = candidates[0];
       matchedCurrentCodes.add(best.c.ledgerCode);
       const variance = best.c.balance - p.balance;
-      results.push({
-        status: "possible_regroup",
-        ledgerCode: p.ledgerCode,
-        ledgerName: p.ledgerName,
-        priorBalance: p.balance,
-        currentBalance: best.c.balance,
-        variance,
-        matchScore: best.score,
-        matchedWith: best.c.ledgerCode,
-      });
+
+      if (best.score >= SCORE_HIGH) {
+        results.push({
+          status: Math.abs(variance) < 0.005 ? "matched" : "mismatched",
+          ledgerCode: p.ledgerCode,
+          ledgerName: p.ledgerName,
+          priorBalance: p.balance,
+          currentBalance: best.c.balance,
+          variance,
+          matchScore: best.score,
+          matchedWith: best.c.ledgerCode !== p.ledgerCode ? best.c.ledgerCode : null,
+        });
+      } else {
+        results.push({
+          status: "possible_regroup",
+          ledgerCode: p.ledgerCode,
+          ledgerName: p.ledgerName,
+          priorBalance: p.balance,
+          currentBalance: best.c.balance,
+          variance,
+          matchScore: best.score,
+          matchedWith: best.c.ledgerCode,
+        });
+      }
     } else {
       results.push({
         status: "missing_current",
