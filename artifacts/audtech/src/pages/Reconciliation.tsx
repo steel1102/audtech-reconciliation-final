@@ -1,4 +1,4 @@
-import { useState, useCallback, useRef } from "react";
+import { useState, useCallback, useRef, useMemo } from "react";
 import { PieChart, Pie, Cell, Tooltip, ResponsiveContainer, BarChart, Bar, XAxis, YAxis, CartesianGrid, Legend } from "recharts";
 import { Upload, FileSpreadsheet, CheckCircle, AlertCircle, XCircle, HelpCircle, ArrowRightLeft, Download, RefreshCw, ChevronUp, ChevronDown } from "lucide-react";
 import { Badge } from "@/components/ui/badge";
@@ -35,6 +35,13 @@ interface ReconciliationSummary {
 interface ReconciliationResult {
   summary: ReconciliationSummary;
   rows: ReconciliationRow[];
+}
+
+interface ManualOverride {
+  cyLedgerName: string;
+  cyLedgerCode: string;
+  cyBalance: number;
+  sourceRowIndex: number;
 }
 
 const STATUS_CONFIG: Record<ReconciliationStatus, { label: string; color: string; icon: React.ReactNode; bg: string }> = {
@@ -169,6 +176,8 @@ export default function Reconciliation() {
   const [sortField, setSortField] = useState<SortField>("status");
   const [sortDir, setSortDir] = useState<SortDir>("asc");
   const [exporting, setExporting] = useState(false);
+  const [overrides, setOverrides] = useState<Record<number, ManualOverride>>({});
+  const [pendingSelection, setPendingSelection] = useState<Record<number, string>>({});
 
   const handleSort = (field: SortField) => {
     if (sortField === field) {
@@ -206,7 +215,7 @@ export default function Reconciliation() {
       const res = await fetch("/api/reconciliation/export", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ rows: result.rows, summary: result.summary }),
+        body: JSON.stringify({ rows: effectiveRows, summary: effectiveSummary }),
       });
       if (!res.ok) throw new Error("Export failed");
       const blob = await res.blob();
@@ -230,9 +239,84 @@ export default function Reconciliation() {
     setError(null);
     setFilterStatus("all");
     setSearch("");
+    setOverrides({});
+    setPendingSelection({});
   };
 
-  const filteredRows = (result?.rows ?? [])
+  // Indices of missing_prior rows consumed by a confirmed override
+  const consumedPriorIndices = useMemo(
+    () => new Set(Object.values(overrides).map(o => o.sourceRowIndex)),
+    [overrides]
+  );
+
+  // Available CY rows for manual mapping (missing_prior rows not yet used)
+  const availableCyRows = useMemo(() => {
+    if (!result) return [];
+    return result.rows
+      .map((r, i) => ({ ...r, _idx: i }))
+      .filter(r => r.status === "missing_prior" && !consumedPriorIndices.has(r._idx));
+  }, [result, consumedPriorIndices]);
+
+  // Effective rows: apply confirmed overrides, hide consumed missing_prior rows
+  const effectiveRows = useMemo<(ReconciliationRow & { _originalIdx: number })[]>(() => {
+    if (!result) return [];
+    return result.rows
+      .map((row, i) => {
+        const ov = overrides[i];
+        if (ov) {
+          const variance = ov.cyBalance - row.priorBalance;
+          return {
+            ...row,
+            _originalIdx: i,
+            status: "possible_regroup" as ReconciliationStatus,
+            currentBalance: ov.cyBalance,
+            variance,
+            matchedWith: ov.cyLedgerCode ? `${ov.cyLedgerCode} – ${ov.cyLedgerName}` : ov.cyLedgerName,
+            matchScore: null,
+            matchStrategy: null,
+          };
+        }
+        return { ...row, _originalIdx: i };
+      })
+      .filter((_, i) => !consumedPriorIndices.has(i));
+  }, [result, overrides, consumedPriorIndices]);
+
+  const effectiveSummary = useMemo(() => {
+    if (!result) return null;
+    return {
+      ...result.summary,
+      matchedCount: effectiveRows.filter(r => r.status === "matched").length,
+      mismatchedCount: effectiveRows.filter(r => r.status === "mismatched").length,
+      missingCurrentCount: effectiveRows.filter(r => r.status === "missing_current").length,
+      missingPriorCount: effectiveRows.filter(r => r.status === "missing_prior").length,
+      possibleRegroupCount: effectiveRows.filter(r => r.status === "possible_regroup").length,
+      totalVariance: effectiveRows.reduce((s, r) => s + r.variance, 0),
+    };
+  }, [effectiveRows, result]);
+
+  const applyOverride = (rowIdx: number) => {
+    const selected = pendingSelection[rowIdx];
+    if (!selected) return;
+    const cyRow = result?.rows.find((r, i) => String(i) === selected);
+    if (!cyRow) return;
+    const sourceRowIndex = result!.rows.indexOf(cyRow);
+    setOverrides(prev => ({
+      ...prev,
+      [rowIdx]: {
+        cyLedgerName: cyRow.ledgerName,
+        cyLedgerCode: cyRow.ledgerCode,
+        cyBalance: cyRow.currentBalance,
+        sourceRowIndex,
+      },
+    }));
+    setPendingSelection(prev => { const n = { ...prev }; delete n[rowIdx]; return n; });
+  };
+
+  const removeOverride = (rowIdx: number) => {
+    setOverrides(prev => { const n = { ...prev }; delete n[rowIdx]; return n; });
+  };
+
+  const filteredRows = effectiveRows
     .filter(r => filterStatus === "all" || r.status === filterStatus)
     .filter(r => {
       if (!search) return true;
@@ -249,18 +333,18 @@ export default function Reconciliation() {
       return sortDir === "asc" ? av.localeCompare(bv) : bv.localeCompare(av);
     });
 
-  const pieData = result ? [
-    { name: "Matched", value: result.summary.matchedCount, color: CHART_COLORS[0] },
-    { name: "Mismatched", value: result.summary.mismatchedCount, color: CHART_COLORS[1] },
-    { name: "Missing in CY", value: result.summary.missingCurrentCount, color: CHART_COLORS[2] },
-    { name: "New in CY", value: result.summary.missingPriorCount, color: CHART_COLORS[3] },
-    { name: "Possible Regroup", value: result.summary.possibleRegroupCount, color: CHART_COLORS[4] },
+  const pieData = effectiveSummary ? [
+    { name: "Matched", value: effectiveSummary.matchedCount, color: CHART_COLORS[0] },
+    { name: "Mismatched", value: effectiveSummary.mismatchedCount, color: CHART_COLORS[1] },
+    { name: "Missing in CY", value: effectiveSummary.missingCurrentCount, color: CHART_COLORS[2] },
+    { name: "New in CY", value: effectiveSummary.missingPriorCount, color: CHART_COLORS[3] },
+    { name: "Possible Regroup", value: effectiveSummary.possibleRegroupCount, color: CHART_COLORS[4] },
   ].filter(d => d.value > 0) : [];
 
-  const barData = result ? [
-    { name: "Prior Year", value: result.summary.totalPrior },
-    { name: "Current Year", value: result.summary.totalCurrent },
-    { name: "Variance", value: result.summary.totalVariance },
+  const barData = effectiveSummary ? [
+    { name: "Prior Year", value: effectiveSummary.totalPrior },
+    { name: "Current Year", value: effectiveSummary.totalCurrent },
+    { name: "Variance", value: effectiveSummary.totalVariance },
   ] : [];
 
   return (
@@ -356,28 +440,28 @@ export default function Reconciliation() {
               <Card className="border-l-4 border-l-green-500">
                 <CardContent className="p-4">
                   <p className="text-xs text-muted-foreground uppercase tracking-wide font-medium">Matched</p>
-                  <p className="text-3xl font-bold text-green-600 mt-1">{result.summary.matchedCount}</p>
+                  <p className="text-3xl font-bold text-green-600 mt-1">{effectiveSummary!.matchedCount}</p>
                   <p className="text-xs text-muted-foreground mt-0.5">Exact ledger matches</p>
                 </CardContent>
               </Card>
               <Card className="border-l-4 border-l-amber-500">
                 <CardContent className="p-4">
                   <p className="text-xs text-muted-foreground uppercase tracking-wide font-medium">Mismatched</p>
-                  <p className="text-3xl font-bold text-amber-600 mt-1">{result.summary.mismatchedCount}</p>
+                  <p className="text-3xl font-bold text-amber-600 mt-1">{effectiveSummary!.mismatchedCount}</p>
                   <p className="text-xs text-muted-foreground mt-0.5">Balance differences</p>
                 </CardContent>
               </Card>
               <Card className="border-l-4 border-l-red-500">
                 <CardContent className="p-4">
                   <p className="text-xs text-muted-foreground uppercase tracking-wide font-medium">Missing in CY</p>
-                  <p className="text-3xl font-bold text-red-600 mt-1">{result.summary.missingCurrentCount}</p>
+                  <p className="text-3xl font-bold text-red-600 mt-1">{effectiveSummary!.missingCurrentCount}</p>
                   <p className="text-xs text-muted-foreground mt-0.5">In PY, not in CY</p>
                 </CardContent>
               </Card>
               <Card className="border-l-4 border-l-violet-500">
                 <CardContent className="p-4">
                   <p className="text-xs text-muted-foreground uppercase tracking-wide font-medium">Possible Regroup</p>
-                  <p className="text-3xl font-bold text-violet-600 mt-1">{result.summary.possibleRegroupCount}</p>
+                  <p className="text-3xl font-bold text-violet-600 mt-1">{effectiveSummary!.possibleRegroupCount}</p>
                   <p className="text-xs text-muted-foreground mt-0.5">Fuzzy-matched ledgers</p>
                 </CardContent>
               </Card>
@@ -388,20 +472,20 @@ export default function Reconciliation() {
               <Card>
                 <CardContent className="p-4">
                   <p className="text-xs text-muted-foreground uppercase tracking-wide font-medium">Total PY Balance</p>
-                  <p className="text-xl font-bold mt-1">{fmt(result.summary.totalPrior)}</p>
+                  <p className="text-xl font-bold mt-1">{fmt(effectiveSummary!.totalPrior)}</p>
                 </CardContent>
               </Card>
               <Card>
                 <CardContent className="p-4">
                   <p className="text-xs text-muted-foreground uppercase tracking-wide font-medium">Total CY Balance</p>
-                  <p className="text-xl font-bold mt-1">{fmt(result.summary.totalCurrent)}</p>
+                  <p className="text-xl font-bold mt-1">{fmt(effectiveSummary!.totalCurrent)}</p>
                 </CardContent>
               </Card>
-              <Card className={cn("border-l-4", Math.abs(result.summary.totalVariance) < 0.01 ? "border-l-green-500" : "border-l-amber-500")}>
+              <Card className={cn("border-l-4", Math.abs(effectiveSummary!.totalVariance) < 0.01 ? "border-l-green-500" : "border-l-amber-500")}>
                 <CardContent className="p-4">
                   <p className="text-xs text-muted-foreground uppercase tracking-wide font-medium">Total Variance</p>
-                  <p className={cn("text-xl font-bold mt-1", Math.abs(result.summary.totalVariance) < 0.01 ? "text-green-600" : "text-amber-600")}>
-                    {fmt(result.summary.totalVariance)}
+                  <p className={cn("text-xl font-bold mt-1", Math.abs(effectiveSummary!.totalVariance) < 0.01 ? "text-green-600" : "text-amber-600")}>
+                    {fmt(effectiveSummary!.totalVariance)}
                   </p>
                 </CardContent>
               </Card>
@@ -454,7 +538,7 @@ export default function Reconciliation() {
             <Card>
               <CardHeader className="pb-3">
                 <div className="flex items-center justify-between gap-4 flex-wrap">
-                  <CardTitle className="text-sm font-semibold">Reconciliation Detail ({filteredRows.length} of {result.rows.length})</CardTitle>
+                  <CardTitle className="text-sm font-semibold">Reconciliation Detail ({filteredRows.length} of {effectiveRows.length})</CardTitle>
                   <div className="flex items-center gap-2 flex-wrap">
                     <input
                       type="search"
@@ -476,7 +560,7 @@ export default function Reconciliation() {
                           )}
                         >
                           {s === "all" ? "All" : STATUS_CONFIG[s].label}
-                          {s !== "all" && ` (${result.summary[`${s === "missing_current" ? "missingCurrentCount" : s === "missing_prior" ? "missingPriorCount" : s === "possible_regroup" ? "possibleRegroupCount" : `${s}Count`}` as keyof ReconciliationSummary]})`}
+                          {s !== "all" && ` (${effectiveSummary![`${s === "missing_current" ? "missingCurrentCount" : s === "missing_prior" ? "missingPriorCount" : s === "possible_regroup" ? "possibleRegroupCount" : `${s}Count`}` as keyof ReconciliationSummary]})`}
                         </button>
                       ))}
                     </div>
@@ -517,14 +601,54 @@ export default function Reconciliation() {
                             No results found
                           </td>
                         </tr>
-                      ) : filteredRows.map((row, i) => (
+                      ) : filteredRows.map((row, i) => {
+                        const origIdx = row._originalIdx;
+                        const isOverridden = !!overrides[origIdx];
+                        const isMissingCurrent = row.status === "missing_current";
+                        const hasCyOptions = availableCyRows.length > 0;
+                        return (
                         <tr key={i} className={cn("border-b transition-colors hover:bg-muted/30", i % 2 === 0 ? "" : "bg-muted/10")}>
                           <td className="px-4 py-2.5"><StatusBadge status={row.status} /></td>
                           <td className="px-4 py-2.5 font-mono text-xs text-muted-foreground">{row.ledgerCode || "—"}</td>
                           <td className="px-4 py-2.5 font-medium max-w-xs">
                             <span className="truncate block" title={row.ledgerName}>{row.ledgerName}</span>
-                            {row.matchedWith && (
+                            {row.matchedWith && !isOverridden && (
                               <span className="text-xs text-muted-foreground font-normal">→ {row.matchedWith}</span>
+                            )}
+                            {isOverridden && (
+                              <span className="text-xs text-violet-600 font-normal flex items-center gap-1">
+                                → {overrides[origIdx].cyLedgerName}
+                                <button
+                                  onClick={() => removeOverride(origIdx)}
+                                  className="text-muted-foreground hover:text-destructive ml-1"
+                                  title="Remove manual mapping"
+                                >✕</button>
+                              </span>
+                            )}
+                            {isMissingCurrent && !isOverridden && (
+                              <div className="flex items-center gap-1 mt-1.5">
+                                <select
+                                  value={pendingSelection[origIdx] ?? ""}
+                                  onChange={e => setPendingSelection(prev => ({ ...prev, [origIdx]: e.target.value }))}
+                                  className="text-xs border rounded px-1.5 py-0.5 bg-background text-foreground focus:outline-none focus:ring-1 focus:ring-violet-400 max-w-[180px]"
+                                  disabled={!hasCyOptions}
+                                >
+                                  <option value="">{hasCyOptions ? "Map to CY ledger…" : "No unmatched CY entries"}</option>
+                                  {availableCyRows.map((cy) => (
+                                    <option key={cy._idx} value={String(cy._idx)}>
+                                      {cy.ledgerCode ? `${cy.ledgerCode} – ` : ""}{cy.ledgerName}
+                                    </option>
+                                  ))}
+                                </select>
+                                {pendingSelection[origIdx] && (
+                                  <button
+                                    onClick={() => applyOverride(origIdx)}
+                                    className="text-xs px-2 py-0.5 rounded bg-violet-600 text-white hover:bg-violet-700 transition-colors font-medium"
+                                  >
+                                    Apply
+                                  </button>
+                                )}
+                              </div>
                             )}
                           </td>
                           <td className="px-4 py-2.5 text-right font-mono text-sm">{fmt(row.priorBalance)}</td>
@@ -539,20 +663,31 @@ export default function Reconciliation() {
                             <ConfidenceBand score={row.matchScore} strategy={row.matchStrategy} />
                           </td>
                         </tr>
-                      ))}
+                        );
+                      })}
                     </tbody>
                   </table>
                 </div>
               </CardContent>
             </Card>
 
-            {result.summary.missingPriorCount > 0 && (
+            {effectiveSummary!.missingPriorCount > 0 && (
               <Card className="border-blue-200 bg-blue-50/30">
                 <CardContent className="p-4 flex items-start gap-3">
                   <ArrowRightLeft className="w-4 h-4 text-blue-600 mt-0.5 shrink-0" />
                   <div className="text-sm text-blue-800">
-                    <span className="font-semibold">{result.summary.missingPriorCount} new ledger{result.summary.missingPriorCount > 1 ? "s" : ""}</span> found in the Current Year Opening TB that have no corresponding entry in the Prior Year FS.
+                    <span className="font-semibold">{effectiveSummary!.missingPriorCount} new ledger{effectiveSummary!.missingPriorCount > 1 ? "s" : ""}</span> found in the Current Year Opening TB that have no corresponding entry in the Prior Year FS.
                     These may represent new accounts opened during the year.
+                  </div>
+                </CardContent>
+              </Card>
+            )}
+            {Object.keys(overrides).length > 0 && (
+              <Card className="border-violet-200 bg-violet-50/30">
+                <CardContent className="p-4 flex items-start gap-3">
+                  <HelpCircle className="w-4 h-4 text-violet-600 mt-0.5 shrink-0" />
+                  <div className="text-sm text-violet-800">
+                    <span className="font-semibold">{Object.keys(overrides).length} manual mapping{Object.keys(overrides).length > 1 ? "s" : ""}</span> applied by auditor. These overrides will be included in the exported report.
                   </div>
                 </CardContent>
               </Card>

@@ -40,33 +40,88 @@ interface ReconciliationSummary {
 
 let lastResult: { summary: ReconciliationSummary; rows: ReconciliationRow[] } | null = null;
 
+function isNumericValue(v: unknown): boolean {
+  const s = String(v ?? "").trim().replace(/,/g, "");
+  return s !== "" && !isNaN(parseFloat(s)) && isFinite(Number(s));
+}
+
+function detectColumns(headers: string[], sample: Record<string, unknown>[]): {
+  codeKey: string;
+  nameKey: string;
+  debitKey: string | undefined;
+  creditKey: string | undefined;
+  balanceKey: string;
+} {
+  const lh = (h: string) => h.toLowerCase().trim();
+
+  // Header keyword matching — more specific patterns first, exclude hybrid like "Account Name"
+  const debitKey  = headers.find(h => /\b(debit|dr)\b/i.test(h));
+  const creditKey = headers.find(h => /\b(credit|cr)\b/i.test(h));
+
+  // Code: explicit code/account-number headers, but NOT "account name"-style
+  const codeKey = headers.find(h => {
+    const l = lh(h);
+    return /\bcode\b/i.test(l) || /account[\s._-]?no/i.test(l) || /\bacct[\s._-]?no\b/i.test(l) || /\ba\/c\b/i.test(l);
+  });
+
+  // Name: explicit name/description/ledger headers
+  const nameByHeader = headers.find(h => {
+    const l = lh(h);
+    return /\bname\b/.test(l) || /\bdescription\b/.test(l) || /\bparticulars\b/.test(l)
+        || /\bledger\b/.test(l) || /\btitle\b/.test(l);
+  });
+
+  // Balance: explicit balance/amount headers
+  const balanceByHeader = headers.find(h => /\b(balance|amount|net|total)\b/i.test(h));
+
+  // ── Value-based fallback ──
+  // Compute per-column numeric ratio from sample rows
+  const colStats = headers
+    .filter(h => h !== debitKey && h !== creditKey)
+    .map(h => {
+      const vals = sample.map(r => r[h]).filter(v => String(v ?? "").trim() !== "");
+      const numCount = vals.filter(isNumericValue).length;
+      return { h, numericRatio: vals.length > 0 ? numCount / vals.length : 0, nonEmpty: vals.length };
+    })
+    .sort((a, b) => b.nonEmpty - a.nonEmpty); // prefer columns with more data
+
+  // Most numeric column (excluding already identified) → balance
+  const balanceFallback = colStats.filter(s => s.h !== codeKey && s.h !== nameByHeader)
+    .sort((a, b) => b.numericRatio - a.numericRatio)[0]?.h ?? headers[headers.length - 1];
+
+  // Most text-like column → name
+  const usedBalance = balanceByHeader ?? balanceFallback;
+  const nameFallback = colStats
+    .filter(s => s.h !== codeKey && s.h !== usedBalance)
+    .sort((a, b) => a.numericRatio - b.numericRatio)[0]?.h ?? headers[0];
+
+  return {
+    codeKey:    codeKey ?? "",
+    nameKey:    nameByHeader ?? nameFallback,
+    debitKey,
+    creditKey,
+    balanceKey: balanceByHeader ?? balanceFallback,
+  };
+}
+
 function parseWorkbook(buffer: Buffer): LedgerRow[] {
   const wb = XLSX.read(buffer, { type: "buffer" });
   const sheetName = wb.SheetNames[0];
   const ws = wb.Sheets[sheetName];
   const raw: Record<string, unknown>[] = XLSX.utils.sheet_to_json(ws, { defval: "" });
+  if (raw.length === 0) return [];
+
+  const headers = Object.keys(raw[0]);
+  const sample = raw.slice(0, Math.min(10, raw.length));
+  const { codeKey, nameKey, debitKey, creditKey, balanceKey } = detectColumns(headers, sample);
+
+  logger.info({ headers, codeKey, nameKey, debitKey, creditKey, balanceKey }, "COLUMN_DETECTION");
 
   const rows: LedgerRow[] = [];
   for (const row of raw) {
-    const keys = Object.keys(row).map((k) => k.toLowerCase().trim());
-
-    const codeKey = Object.keys(row).find((k) =>
-      /code|account.?no|acct|no/i.test(k)
-    ) ?? Object.keys(row)[0];
-
-    const nameKey = Object.keys(row).find((k) =>
-      /name|description|desc|account|ledger/i.test(k)
-    ) ?? Object.keys(row)[1];
-
-    const debitKey = Object.keys(row).find((k) => /debit|dr/i.test(k));
-    const creditKey = Object.keys(row).find((k) => /credit|cr/i.test(k));
-    const balanceKey = Object.keys(row).find((k) =>
-      /balance|amount|net|total/i.test(k)
-    ) ?? Object.keys(row)[2];
-
-    const code = String(row[codeKey] ?? "").trim();
+    const code = codeKey ? String(row[codeKey] ?? "").trim() : "";
     const name = String(row[nameKey] ?? "").trim();
-    if (!code && !name) continue;
+    if (!name || isNumericValue(name)) continue; // skip rows where name looks like a number
 
     let balance: number;
     if (debitKey && creditKey) {
