@@ -32,6 +32,9 @@ interface ReconciliationRow {
   matchScore: number | null;
   matchedWith: string | null;
   matchStrategy: MatchStrategy | null;
+  /** Plain-English explanation of why this row was classified as it was.
+   *  Populated for possible_regroup, mismatched-by-fuzzy, and missing rows. */
+  matchReason: string | null;
 }
 
 interface ReconciliationSummary {
@@ -232,8 +235,9 @@ function tokenSetRatio(a: string, b: string): number {
 }
 
 /**
- * Composite fuzzy scorer. Runs six similarity passes over normalised/stemmed
- * strings plus a domain-specific alias lookup, then returns the highest score.
+ * Composite fuzzy scorer. Runs six string-similarity passes plus a domain
+ * alias lookup, then returns the highest-scoring result together with the
+ * alias entry that fired (if any) so callers can generate reason text.
  *
  * Passes (in order):
  *  1. ratio           — character-level edit distance on normalised strings
@@ -242,91 +246,226 @@ function tokenSetRatio(a: string, b: string): number {
  *  4. partial stemmed — same as 2 but stemmed
  *  5. token_sort      — sort tokens alphabetically then compare (word-order agnostic)
  *  6. token_set       — intersection/difference set comparison (handles extra words)
- *  7. alias           — hardcoded accounting synonym table (domain knowledge boost)
+ *  7. alias           — financial synonym table (domain knowledge boost, score=88)
  */
-function fuzzyScore(a: string, b: string): { score: number; strategy: MatchStrategy } {
+function fuzzyScore(a: string, b: string): {
+  score: number;
+  strategy: MatchStrategy;
+  aliasMatch: [string, string, string] | null;
+} {
   const na = normalize(a);
   const nb = normalize(b);
   const sa = normalizedStemmed(a);
   const sb = normalizedStemmed(b);
-  if (na === nb) return { score: 100, strategy: "ratio" };
-  if (!na || !nb) return { score: 0, strategy: "ratio" };
+  if (na === nb) return { score: 100, strategy: "ratio", aliasMatch: null };
+  if (!na || !nb) return { score: 0,   strategy: "ratio", aliasMatch: null };
+
+  const alias = getAliasMatch(a, b);
 
   const candidates: { score: number; strategy: MatchStrategy }[] = [
-    { score: ratio(na, nb),         strategy: "ratio" },
-    { score: partialRatio(na, nb),  strategy: "partial" },
-    { score: ratio(sa, sb),         strategy: "ratio" },
-    { score: partialRatio(sa, sb),  strategy: "partial" },
+    { score: ratio(na, nb),         strategy: "ratio"      },
+    { score: partialRatio(na, nb),  strategy: "partial"    },
+    { score: ratio(sa, sb),         strategy: "ratio"      },
+    { score: partialRatio(sa, sb),  strategy: "partial"    },
     { score: tokenSortRatio(a, b),  strategy: "token_sort" },
-    { score: tokenSetRatio(a, b),   strategy: "token_set" },
+    { score: tokenSetRatio(a, b),   strategy: "token_set"  },
     // Domain alias boost — fires for known accounting synonym pairs.
-    // Score is fixed at 88 so it lands in "possible_regroup" (not "matched").
-    { score: aliasScore(a, b),      strategy: "token_set" },
+    // Score fixed at 88 so it always lands in "possible_regroup" (< SCORE_HIGH).
+    { score: alias ? 88 : 0,        strategy: "token_set"  },
   ];
-  return candidates.reduce((best, c) => (c.score > best.score ? c : best));
+  const best = candidates.reduce((b, c) => (c.score > b.score ? c : b));
+  return { ...best, aliasMatch: alias };
 }
 
-// ─── Accounting alias pairs ──────────────────────────────────────────────────
-// Firms often record the same account under different but semantically equivalent
-// names (e.g. "Outstanding Salaries" vs "Salary Payable"). Pure string similarity
-// can score these below the regroup threshold because the words are different even
-// though the accounting meaning is identical. The table below lists known alias
-// pairs; if both names normalise to a matching pair we inject a synthetic score
-// of 88 so the reconciliation engine always flags them as "possible_regroup".
-const ACCOUNTING_ALIASES: Array<[string, string]> = [
-  // Payroll liabilities
-  ["outstanding salaries",    "salary payable"],
-  ["outstanding wages",       "wage payable"],
-  ["accrued salaries",        "salary payable"],
-  ["accrued wages",           "wage payable"],
-  // Receivables
-  ["debtors",                 "trade receivable"],
-  ["sundry debtors",          "trade receivable"],
-  ["debtors",                 "trade debtor"],
-  ["accounts receivable",     "trade receivable"],
-  // Payables
-  ["creditors",               "trade payable"],
-  ["sundry creditors",        "trade payable"],
-  ["creditors",               "trade creditor"],
-  ["accounts payable",        "trade payable"],
-  // Inventory
-  ["stock",                   "inventory"],
-  ["closing stock",           "inventory"],
-  ["opening stock",           "inventory"],
-  ["goods in hand",           "inventory"],
-  // Fixed assets
-  ["fixed assets",            "property plant and equipment"],
-  ["fixed assets",            "ppe"],
-  ["tangible assets",         "property plant and equipment"],
-  // Cash
-  ["cash and bank",           "bank balance"],
-  ["cash and bank balances",  "bank balance"],
-  ["cash and cash equivalents", "bank balance"],
-  ["bank overdraft",          "overdraft"],
-  // Loans
-  ["bank loan",               "term loan"],
-  ["bank term loan",          "term loan"],
-  ["bank borrowings",         "term loan"],
-  // Taxes
-  ["gst receivable",          "input tax credit"],
-  ["gst payable",             "output tax liability"],
-  ["tds receivable",          "tax deducted at source"],
+// ─── Financial synonym alias table ───────────────────────────────────────────
+// Each entry is [termA, termB, category] where termA and termB are normalised
+// strings (lowercase, no special chars). When both ledger names contain one term
+// of a pair we inject a synthetic score of 88, guaranteeing "possible_regroup"
+// classification and generating a human-readable reason string.
+//
+// Adding new aliases: add a row here. No other code needs to change.
+const ACCOUNTING_ALIASES: Array<[string, string, string]> = [
+  // ── Payroll & HR liabilities ──────────────────────────────────────────────
+  ["outstanding salaries",      "salary payable",              "Payroll liabilities"],
+  ["outstanding wages",         "wage payable",                "Payroll liabilities"],
+  ["accrued salaries",          "salary payable",              "Payroll liabilities"],
+  ["accrued wages",             "wage payable",                "Payroll liabilities"],
+  ["salaries payable",          "salary payable",              "Payroll liabilities"],
+  ["employee benefits payable", "salary payable",              "Payroll liabilities"],
+
+  // ── Trade receivables ─────────────────────────────────────────────────────
+  ["debtors",                   "trade receivable",            "Trade receivables"],
+  ["sundry debtors",            "trade receivable",            "Trade receivables"],
+  ["debtors",                   "trade debtor",                "Trade receivables"],
+  ["accounts receivable",       "trade receivable",            "Trade receivables"],
+  ["book debts",                "trade receivable",            "Trade receivables"],
+  ["bills receivable",          "trade receivable",            "Trade receivables"],
+
+  // ── Trade payables ────────────────────────────────────────────────────────
+  ["creditors",                 "trade payable",               "Trade payables"],
+  ["sundry creditors",          "trade payable",               "Trade payables"],
+  ["creditors",                 "trade creditor",              "Trade payables"],
+  ["accounts payable",          "trade payable",               "Trade payables"],
+  ["bills payable",             "trade payable",               "Trade payables"],
+  ["trade payables",            "sundry creditors",            "Trade payables"],
+
+  // ── Professional & audit fees ─────────────────────────────────────────────
+  ["audit fees",                "professional charges",        "Professional fees"],
+  ["audit fees",                "professional fees",           "Professional fees"],
+  ["audit fee",                 "professional charges",        "Professional fees"],
+  ["auditor remuneration",      "professional charges",        "Professional fees"],
+  ["legal and professional",    "professional charges",        "Professional fees"],
+  ["legal fees",                "professional charges",        "Professional fees"],
+  ["consultancy fees",          "professional charges",        "Professional fees"],
+  ["advisory fees",             "professional charges",        "Professional fees"],
+
+  // ── Miscellaneous & general expenses ──────────────────────────────────────
+  ["miscellaneous expense",     "general expenses",            "General/miscellaneous"],
+  ["miscellaneous expenses",    "general expenses",            "General/miscellaneous"],
+  ["misc expense",              "general expenses",            "General/miscellaneous"],
+  ["sundry expenses",           "general expenses",            "General/miscellaneous"],
+  ["sundry expenses",           "miscellaneous expense",       "General/miscellaneous"],
+  ["other expenses",            "general expenses",            "General/miscellaneous"],
+  ["other expenses",            "miscellaneous expense",       "General/miscellaneous"],
+
+  // ── Inventory ─────────────────────────────────────────────────────────────
+  ["stock",                     "inventory",                   "Inventory"],
+  ["closing stock",             "inventory",                   "Inventory"],
+  ["opening stock",             "inventory",                   "Inventory"],
+  ["goods in hand",             "inventory",                   "Inventory"],
+  ["finished goods",            "inventory",                   "Inventory"],
+  ["raw material",              "inventory",                   "Inventory"],
+  ["work in progress",          "inventory",                   "Inventory"],
+  ["wip",                       "work in progress",            "Inventory"],
+
+  // ── Fixed assets / PPE ────────────────────────────────────────────────────
+  ["fixed assets",              "property plant and equipment","Fixed assets"],
+  ["fixed assets",              "ppe",                         "Fixed assets"],
+  ["tangible assets",           "property plant and equipment","Fixed assets"],
+  ["capital work in progress",  "cwip",                        "Fixed assets"],
+  ["capital wip",               "cwip",                        "Fixed assets"],
+
+  // ── Cash & bank ───────────────────────────────────────────────────────────
+  ["cash and bank",             "bank balance",                "Cash & bank"],
+  ["cash and bank balances",    "bank balance",                "Cash & bank"],
+  ["cash and cash equivalents", "bank balance",                "Cash & bank"],
+  ["cash at bank",              "bank balance",                "Cash & bank"],
+  ["bank overdraft",            "overdraft",                   "Cash & bank"],
+
+  // ── Loans & borrowings ────────────────────────────────────────────────────
+  ["bank loan",                 "term loan",                   "Loans"],
+  ["bank term loan",            "term loan",                   "Loans"],
+  ["bank borrowings",           "term loan",                   "Loans"],
+  ["secured loan",              "term loan",                   "Loans"],
+  ["unsecured loan",            "loan from directors",         "Loans"],
+
+  // ── Finance costs ─────────────────────────────────────────────────────────
+  ["interest expense",          "finance charges",             "Finance costs"],
+  ["interest expense",          "finance costs",               "Finance costs"],
+  ["interest on loan",          "finance charges",             "Finance costs"],
+  ["bank charges",              "finance charges",             "Finance costs"],
+
+  // ── Revenue & income ──────────────────────────────────────────────────────
+  ["commission income",         "commission received",         "Income"],
+  ["interest income",           "interest received",           "Income"],
+  ["other income",              "miscellaneous income",        "Income"],
+  ["rental income",             "rent received",               "Income"],
+
+  // ── Operating expenses ────────────────────────────────────────────────────
+  ["rent expense",              "rent charges",                "Operating expenses"],
+  ["office rent",               "rent charges",                "Operating expenses"],
+  ["electricity expense",       "utilities",                   "Operating expenses"],
+  ["power and fuel",            "utilities",                   "Operating expenses"],
+  ["insurance expense",         "insurance premium",           "Operating expenses"],
+  ["repairs and maintenance",   "maintenance expense",         "Operating expenses"],
+
+  // ── Equity & reserves ─────────────────────────────────────────────────────
+  ["retained earnings",         "reserves and surplus",        "Equity"],
+  ["profit and loss account",   "reserves and surplus",        "Equity"],
+  ["share capital",             "paid up capital",             "Equity"],
+  ["equity share capital",      "share capital",               "Equity"],
+
+  // ── Taxes ─────────────────────────────────────────────────────────────────
+  ["gst receivable",            "input tax credit",            "Taxes"],
+  ["gst payable",               "output tax liability",        "Taxes"],
+  ["tds receivable",            "tax deducted at source",      "Taxes"],
+  ["income tax payable",        "provision for tax",           "Taxes"],
+  ["advance tax",               "prepaid tax",                 "Taxes"],
+
+  // ── Provisions & accruals ─────────────────────────────────────────────────
+  ["provision for expenses",    "accrued expenses",            "Provisions"],
+  ["accrued liabilities",       "accrued expenses",            "Provisions"],
+  ["outstanding expenses",      "accrued expenses",            "Provisions"],
+  ["provision for doubtful debts", "bad debt provision",       "Provisions"],
 ];
 
 /**
- * Returns 88 if the two ledger names match a known accounting alias pair,
- * otherwise 0. Matching is substring-based on normalised strings so minor
- * surrounding words (e.g. "net" or "total") do not prevent a match.
+ * Returns the first alias pair that matches both names (as substrings of their
+ * normalised forms), or null if no alias applies.
  */
-function aliasScore(a: string, b: string): number {
+function getAliasMatch(a: string, b: string): [string, string, string] | null {
   const na = normalize(a);
   const nb = normalize(b);
-  for (const [x, y] of ACCOUNTING_ALIASES) {
+  for (const [x, y, category] of ACCOUNTING_ALIASES) {
     if ((na.includes(x) && nb.includes(y)) || (na.includes(y) && nb.includes(x))) {
-      return 88;
+      return [x, y, category];
     }
   }
-  return 0;
+  return null;
+}
+
+/** Returns 88 if a known alias pair matches, otherwise 0. */
+function aliasScore(a: string, b: string): number {
+  return getAliasMatch(a, b) !== null ? 88 : 0;
+}
+
+// ─── Regroup reason generation ────────────────────────────────────────────────
+/**
+ * Generates a concise, auditor-readable explanation for why a row was flagged
+ * as "possible_regroup". Used to populate the `matchReason` field.
+ *
+ * @param cyName     – the CY ledger name that was matched
+ * @param score      – the winning fuzzy score (0–100)
+ * @param strategy   – the scoring pass that produced the winning score
+ * @param alias      – the alias entry that fired, if any
+ */
+function generateRegroupReason(
+  cyName: string,
+  score: number,
+  strategy: MatchStrategy,
+  alias: [string, string, string] | null,
+): string {
+  if (alias) {
+    const [, , category] = alias;
+    return `Financial synonym (${category}): matched to "${cyName}"`;
+  }
+  const pct = score;
+  switch (strategy) {
+    case "partial":
+      return `Partial name overlap ${pct}%: "${cyName}" shares a significant sub-string`;
+    case "token_sort":
+      return `Same keywords, different order ${pct}%: matched to "${cyName}"`;
+    case "token_set":
+      return `Shared key terms ${pct}%: common financial words with "${cyName}"`;
+    case "ratio":
+      return `High character similarity ${pct}%: close spelling match to "${cyName}"`;
+    default:
+      return `Fuzzy name match ${pct}%: matched to "${cyName}"`;
+  }
+}
+
+/** Reason text for a fuzzy hit that scores ≥ SCORE_HIGH (treated as matched/mismatched). */
+function generateHighConfidenceReason(
+  cyName: string,
+  score: number,
+  strategy: MatchStrategy,
+  alias: [string, string, string] | null,
+): string {
+  if (alias) {
+    const [, , category] = alias;
+    return `High-confidence synonym (${category}): matched to "${cyName}"`;
+  }
+  return `High-confidence fuzzy match ${score}% via ${strategy}: matched to "${cyName}"`;
 }
 
 // ─── Scoring thresholds ───────────────────────────────────────────────────────
@@ -359,6 +498,7 @@ function reconcile(prior: LedgerRow[], current: LedgerRow[]): ReconciliationRow[
   const matchedCurrentIdx = new Set<number>();
 
   for (const p of prior) {
+    // ── Pass 1: Exact account code match ──────────────────────────────────
     const exactIdx = p.ledgerCode !== ""
       ? current.findIndex((c, i) => c.ledgerCode === p.ledgerCode && !matchedCurrentIdx.has(i))
       : -1;
@@ -377,10 +517,12 @@ function reconcile(prior: LedgerRow[], current: LedgerRow[]): ReconciliationRow[
         matchScore: 100,
         matchedWith: null,
         matchStrategy: "exact_code",
+        matchReason: null, // exact matches need no explanation
       });
       continue;
     }
 
+    // ── Pass 2: Exact normalised name match ───────────────────────────────
     const exactNameIdx = current.findIndex(
       (c, i) => normalize(c.ledgerName) === normalize(p.ledgerName) && !matchedCurrentIdx.has(i)
     );
@@ -398,10 +540,13 @@ function reconcile(prior: LedgerRow[], current: LedgerRow[]): ReconciliationRow[
         matchScore: 100,
         matchedWith: exactName.ledgerCode !== p.ledgerCode ? exactName.ledgerCode : null,
         matchStrategy: "exact_name",
+        matchReason: null,
       });
       continue;
     }
 
+    // ── Pass 3: Fuzzy / alias matching ────────────────────────────────────
+    // Score every unmatched CY entry; keep those above SCORE_REGROUP threshold.
     const candidates = current
       .map((c, i) => ({ c, i, ...fuzzyScore(p.ledgerName, c.ledgerName) }))
       .filter((x) => !matchedCurrentIdx.has(x.i) && x.score >= SCORE_REGROUP)
@@ -413,6 +558,7 @@ function reconcile(prior: LedgerRow[], current: LedgerRow[]): ReconciliationRow[
       const variance = best.c.balance - p.balance;
 
       if (best.score >= SCORE_HIGH) {
+        // High-confidence fuzzy hit → treated as matched/mismatched, not regroup
         results.push({
           status: Math.abs(variance) < 0.005 ? "matched" : "mismatched",
           ledgerCode: p.ledgerCode,
@@ -423,8 +569,12 @@ function reconcile(prior: LedgerRow[], current: LedgerRow[]): ReconciliationRow[
           matchScore: best.score,
           matchedWith: best.c.ledgerCode !== p.ledgerCode ? best.c.ledgerCode : null,
           matchStrategy: best.strategy,
+          matchReason: generateHighConfidenceReason(
+            best.c.ledgerName, best.score, best.strategy, best.aliasMatch
+          ),
         });
       } else {
+        // Below SCORE_HIGH → flag as possible regroup for auditor review
         results.push({
           status: "possible_regroup",
           ledgerCode: p.ledgerCode,
@@ -435,10 +585,13 @@ function reconcile(prior: LedgerRow[], current: LedgerRow[]): ReconciliationRow[
           matchScore: best.score,
           matchedWith: best.c.ledgerCode || best.c.ledgerName,
           matchStrategy: best.strategy,
+          matchReason: generateRegroupReason(
+            best.c.ledgerName, best.score, best.strategy, best.aliasMatch
+          ),
         });
       }
     } else {
-      // Log top-3 near-miss scores so we can diagnose low-score misses
+      // No candidate above threshold — log top-3 near-misses for diagnostics
       const topMisses = current
         .map((c, i) => ({ name: c.ledgerName, code: c.ledgerCode, i, ...fuzzyScore(p.ledgerName, c.ledgerName) }))
         .filter((x) => !matchedCurrentIdx.has(x.i))
@@ -456,10 +609,14 @@ function reconcile(prior: LedgerRow[], current: LedgerRow[]): ReconciliationRow[
         matchScore: null,
         matchedWith: null,
         matchStrategy: null,
+        matchReason: topMisses.length > 0
+          ? `Best near-miss: "${topMisses[0].name}" (${topMisses[0].score}%) — below regroup threshold`
+          : "No similar CY ledger found",
       });
     }
   }
 
+  // ── Add unmatched CY entries as "New in CY" ───────────────────────────────
   for (const [i, c] of current.entries()) {
     if (!matchedCurrentIdx.has(i)) {
       results.push({
@@ -472,6 +629,7 @@ function reconcile(prior: LedgerRow[], current: LedgerRow[]): ReconciliationRow[
         matchScore: null,
         matchedWith: null,
         matchStrategy: null,
+        matchReason: "No matching Prior Year entry found — new account in Current Year",
       });
     }
   }
@@ -734,39 +892,34 @@ router.post("/reconciliation/export", async (req, res): Promise<void> => {
       "Prior Year Balance",
       "Current Year Opening Balance",
       "Variance",
-      "Match Score",
-      "Matched With Code",
+      "Match Score (%)",
+      "Matched With",
+      "Regroup / Match Reason",
     ];
-    const detailData = [
-      headers,
-      ...rows.map((r) => [
-        r.status.replace(/_/g, " ").replace(/\b\w/g, (c) => c.toUpperCase()),
-        r.ledgerCode,
-        r.ledgerName,
-        r.priorBalance,
-        r.currentBalance,
-        r.variance,
-        r.matchScore ?? "",
-        r.matchedWith ?? "",
-      ]),
+    const rowToArray = (r: ReconciliationRow) => [
+      r.status.replace(/_/g, " ").replace(/\b\w/g, (c) => c.toUpperCase()),
+      r.ledgerCode,
+      r.ledgerName,
+      r.priorBalance,
+      r.currentBalance,
+      r.variance,
+      r.matchScore ?? "",
+      r.matchedWith ?? "",
+      r.matchReason ?? "",
     ];
+    const detailData = [headers, ...rows.map(rowToArray)];
     const wsDetail = XLSX.utils.aoa_to_sheet(detailData);
     wsDetail["!cols"] = [
       { wch: 22 }, { wch: 15 }, { wch: 40 },
       { wch: 22 }, { wch: 28 }, { wch: 16 },
-      { wch: 14 }, { wch: 20 },
+      { wch: 14 }, { wch: 25 }, { wch: 60 },
     ];
     XLSX.utils.book_append_sheet(wb, wsDetail, "Reconciliation Detail");
 
     for (const status of ["matched", "mismatched", "missing_current", "missing_prior", "possible_regroup"] as ReconciliationStatus[]) {
       const filtered = rows.filter((r) => r.status === status);
       if (filtered.length === 0) continue;
-      const sheetData = [headers, ...filtered.map((r) => [
-        r.status.replace(/_/g, " ").replace(/\b\w/g, (c) => c.toUpperCase()),
-        r.ledgerCode, r.ledgerName, r.priorBalance,
-        r.currentBalance, r.variance,
-        r.matchScore ?? "", r.matchedWith ?? "",
-      ])];
+      const sheetData = [headers, ...filtered.map(rowToArray)];
       const ws = XLSX.utils.aoa_to_sheet(sheetData);
       ws["!cols"] = wsDetail["!cols"];
       const label = status.replace(/_/g, " ").replace(/\b\w/g, (c) => c.toUpperCase());

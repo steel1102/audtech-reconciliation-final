@@ -19,6 +19,7 @@ interface ReconciliationRow {
   matchScore: number | null;
   matchedWith: string | null;
   matchStrategy: MatchStrategy | null;
+  matchReason: string | null;
 }
 
 interface ReconciliationSummary {
@@ -295,6 +296,7 @@ export default function Reconciliation() {
             matchedWith: ov.cyLedgerCode ? `${ov.cyLedgerCode} – ${ov.cyLedgerName}` : ov.cyLedgerName,
             matchScore: null,
             matchStrategy: null,
+            matchReason: "Manually mapped by auditor",
           };
         }
         return { ...row, _originalIdx: i };
@@ -635,6 +637,11 @@ export default function Reconciliation() {
                             <span className="truncate block" title={row.ledgerName}>{row.ledgerName}</span>
                             {row.matchedWith && !isOverridden && (
                               <span className="text-xs text-muted-foreground font-normal">→ {row.matchedWith}</span>
+                            )}
+                            {row.matchReason && !isOverridden && row.status === "possible_regroup" && (
+                              <span className="text-xs text-violet-600/80 italic font-normal mt-0.5 block leading-tight">
+                                {row.matchReason}
+                              </span>
                             )}
                             {isOverridden && (
                               <span className="text-xs text-violet-600 font-normal flex items-center gap-1">
