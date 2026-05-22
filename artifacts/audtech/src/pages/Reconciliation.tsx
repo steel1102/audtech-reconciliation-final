@@ -157,7 +157,7 @@ function FileDropZone({
             <p className="text-xs text-muted-foreground mt-0.5">{(file.size / 1024).toFixed(1)} KB</p>
             {isPdf && (
               <p className="text-xs text-amber-600 mt-1 font-medium">
-                PDF support coming soon — OCR extraction not yet active
+                PDF detected — text layer will be extracted automatically
               </p>
             )}
           </div>

@@ -1,6 +1,13 @@
 import { Router, type IRouter } from "express";
 import multer from "multer";
 import * as XLSX from "xlsx";
+// pdf-parse v1 is a CJS module; the banner in build.mjs sets globalThis.require
+// so it bundles correctly into our ESM output.
+// We import from the inner lib file to bypass index.js which reads a test PDF
+// at module-load time — a known bug in pdf-parse@1.1.1.
+// eslint-disable-next-line @typescript-eslint/no-require-imports
+const pdfParse: (buf: Buffer) => Promise<{ text: string; numpages: number }> =
+  require("pdf-parse/lib/pdf-parse.js");
 import { logger } from "../lib/logger";
 
 const router: IRouter = Router();
@@ -472,20 +479,114 @@ function reconcile(prior: LedgerRow[], current: LedgerRow[]): ReconciliationRow[
   return results;
 }
 
-// ─── PDF extraction placeholder ───────────────────────────────────────────────
+// ─── PDF text extraction ──────────────────────────────────────────────────────
 // Architecture:
 //   PDF Upload → parsePdf() → LedgerRow[]
-//               → (same) reconcile() → Dashboard & Export
+//               → reconcile() → Dashboard & Export
 //
-// TODO(pdf-ocr): Install a PDF-to-text library (e.g. pdf-parse or pdfjs-dist)
-//   and replace the stub below with real text extraction.
-// TODO(pdf-ocr): After text extraction, detect the table structure (likely
-//   two-column: name | balance) and parse rows into LedgerRow[].
-// TODO(pdf-ocr): If the PDF is scanned (no embedded text), integrate an OCR
-//   engine (e.g. Tesseract via tesseract.js) to extract the image layer first.
-function parsePdf(_buffer: Buffer): LedgerRow[] {
-  // TODO(pdf-ocr): replace this stub with actual PDF → LedgerRow[] extraction.
-  throw new Error("PDF_NOT_SUPPORTED");
+// This implementation handles digitally-created PDFs (embedded text layer).
+// TODO(pdf-ocr): For scanned PDFs (image-only), integrate Tesseract.js OCR here
+//   to first convert each page image to text, then pass to extractLedgerLines().
+
+/**
+ * Regex that recognises the rightmost currency-style number on a line.
+ * Handles:
+ *   1,234.56        → positive
+ *   (1,234.56)      → negative (parenthesis convention)
+ *   -1,234.56       → negative
+ *   1,234.56 Cr     → negative (credit = liability)
+ *   1,234.56 Dr     → positive
+ *   1,234           → integer balance
+ */
+const NUMBER_RE = /(\([\d,]+(?:\.\d+)?\)|[\d,]+(?:\.\d+)?)\s*(Cr|Dr)?$/i;
+
+/** Lines that are almost certainly headers/footers, not data rows. */
+const NOISE_RE = /^\s*($|page\s+\d|date|note[s]?|particulars|description|account|schedule|total|sub.?total|grand\s+total|balance\s+sheet|profit\s+and\s+loss|trial\s+balance|as\s+at|for\s+the\s+(year|period)|rs\.?\s*$|\d{1,2}[-/]\d{1,2}[-/]\d{2,4})/i;
+
+/** Very short runs that look like standalone page numbers or reference codes. */
+const STANDALONE_NUMBER_RE = /^\s*[\d.]+\s*$/;
+
+/**
+ * Parse a single currency token into a signed float.
+ * Parentheses and "Cr" suffix indicate negative values.
+ */
+function parseCurrencyToken(raw: string, suffix: string | undefined): number {
+  const isParens = raw.startsWith("(") && raw.endsWith(")");
+  const cleaned  = raw.replace(/[(),]/g, "");
+  const value    = parseFloat(cleaned) || 0;
+  const isCr     = isParens || (suffix?.toLowerCase() === "cr");
+  return isCr ? -value : value;
+}
+
+/**
+ * Given raw PDF text, extract ledger rows by scanning each line for a pattern:
+ *   [optional code]  <name text>  <balance number>
+ *
+ * Strategy:
+ *  1. Split text into lines; clean excess whitespace.
+ *  2. Skip noise lines (headers, footers, totals, blanks).
+ *  3. Use NUMBER_RE to find the rightmost number token → balance.
+ *  4. Everything to the left is the label; split off a leading short code if present.
+ *  5. Skip rows where the resulting name is empty, purely numeric, or looks like
+ *     a section heading (all caps with no number).
+ */
+function extractLedgerLines(text: string): LedgerRow[] {
+  const rows: LedgerRow[] = [];
+
+  for (const raw of text.split(/\r?\n/)) {
+    const line = raw.trim();
+    if (!line || NOISE_RE.test(line) || STANDALONE_NUMBER_RE.test(line)) continue;
+
+    const match = NUMBER_RE.exec(line);
+    if (!match) continue;
+
+    const balance  = parseCurrencyToken(match[1], match[2]);
+    // Label = everything before the matched number token
+    const label    = line.slice(0, match.index).trim();
+    if (!label || isNumericValue(label)) continue;
+
+    // Optionally split a leading account code: a short (≤8 char) alphanumeric
+    // prefix separated by whitespace from the rest of the name.
+    // E.g. "1100 Trade Receivables" → code="1100", name="Trade Receivables"
+    const codeMatch = /^([A-Z0-9\-./]{1,8})\s{2,}(.+)$/i.exec(label);
+    const ledgerCode = codeMatch ? codeMatch[1].trim() : "";
+    const ledgerName = codeMatch ? codeMatch[2].trim() : label;
+
+    if (!ledgerName || isNumericValue(ledgerName)) continue;
+
+    rows.push({ ledgerCode, ledgerName, balance });
+  }
+
+  return rows;
+}
+
+/**
+ * Parse a PDF buffer into LedgerRow[].
+ * Requires the PDF to have an embedded text layer (digitally created).
+ * Uses pdf-parse v1: pdfParse(buffer) → { text, numpages }.
+ * TODO(pdf-ocr): Add scanned-PDF fallback via Tesseract.js when text is empty.
+ */
+async function parsePdf(buffer: Buffer): Promise<LedgerRow[]> {
+  // pdf-parse v1: pdfParse(buffer) → { text: string, numpages: number }
+  const data = await pdfParse(buffer);
+  const text = data.text ?? "";
+
+  if (!text || text.trim().length < 20) {
+    // TODO(pdf-ocr): scanned PDF detected — no embedded text. Integrate OCR here.
+    throw new Error("PDF_SCANNED");
+  }
+
+  logger.info({ pages: data.numpages, chars: text.length }, "PDF_PARSED");
+  const rows = extractLedgerLines(text);
+  return rows;
+}
+
+/** Helper: detect PDF by MIME type or file extension. */
+function isPdfFile(file: Express.Multer.File): boolean {
+  return (
+    file.mimetype === "application/pdf" ||
+    file.originalname.toLowerCase().endsWith(".pdf")
+  );
 }
 
 router.post("/reconciliation/upload", upload.fields([
@@ -498,32 +599,47 @@ router.post("/reconciliation/upload", upload.fields([
     return;
   }
 
-  // Detect PDF uploads and return a clear, actionable error.
-  // The multer limit is 20 MB so large scanned PDFs are blocked before this point.
-  const priorMime  = files.priorYear[0].mimetype;
-  const currentMime = files.currentYear[0].mimetype;
-  if (priorMime === "application/pdf" || files.priorYear[0].originalname.toLowerCase().endsWith(".pdf")) {
-    // TODO(pdf-ocr): swap parsePdf() in here once OCR is implemented.
-    res.status(422).json({
-      error: "PDF_NOT_SUPPORTED",
-      message: "PDF upload received for Prior Year FS. Full OCR/text extraction is not yet implemented. Please export your signed FS to Excel (.xlsx) and re-upload.",
-    });
-    return;
-  }
-  if (currentMime === "application/pdf" || files.currentYear[0].originalname.toLowerCase().endsWith(".pdf")) {
-    res.status(422).json({
-      error: "PDF_NOT_SUPPORTED",
-      message: "PDF upload received for Current Year TB. Please export to Excel (.xlsx) and re-upload.",
-    });
-    return;
-  }
+  const priorFile   = files.priorYear[0];
+  const currentFile = files.currentYear[0];
 
   try {
-    const prior = parseWorkbook(files.priorYear[0].buffer);
-    const current = parseWorkbook(files.currentYear[0].buffer);
+    // Parse Prior Year — supports Excel, CSV, and digitally-created PDF
+    let prior: LedgerRow[];
+    if (isPdfFile(priorFile)) {
+      try {
+        prior = await parsePdf(priorFile.buffer);
+      } catch (pdfErr: unknown) {
+        const msg = pdfErr instanceof Error ? pdfErr.message : "";
+        if (msg === "PDF_SCANNED") {
+          res.status(422).json({
+            error: "PDF_SCANNED",
+            message: "The Prior Year PDF appears to be a scanned image with no embedded text. Please export to Excel (.xlsx) or use a digitally-created PDF.",
+          });
+        } else {
+          res.status(422).json({
+            error: "PDF_PARSE_ERROR",
+            message: "Could not extract ledger data from the Prior Year PDF. Ensure the PDF contains a text layer and the balances appear on the same line as the account names.",
+          });
+        }
+        return;
+      }
+    } else {
+      prior = parseWorkbook(priorFile.buffer);
+    }
+
+    // Parse Current Year — Excel/CSV only (TB is typically spreadsheet-based)
+    // TODO(pdf-ocr): extend to support PDF for Current Year TB if required.
+    if (isPdfFile(currentFile)) {
+      res.status(422).json({
+        error: "PDF_NOT_SUPPORTED",
+        message: "PDF upload is only supported for the Prior Year Signed FS. Please upload the Current Year Opening TB as Excel (.xlsx) or CSV.",
+      });
+      return;
+    }
+    const current = parseWorkbook(currentFile.buffer);
 
     if (prior.length === 0) {
-      res.status(400).json({ error: "Could not parse any rows from the Prior Year file. Check column headers." });
+      res.status(400).json({ error: "Could not parse any rows from the Prior Year file. Check that ledger names and balances appear on the same line." });
       return;
     }
     if (current.length === 0) {
