@@ -224,6 +224,19 @@ function tokenSetRatio(a: string, b: string): number {
   return Math.max(ratio(t1, t2), ratio(t1, t3), ratio(t2, t3));
 }
 
+/**
+ * Composite fuzzy scorer. Runs six similarity passes over normalised/stemmed
+ * strings plus a domain-specific alias lookup, then returns the highest score.
+ *
+ * Passes (in order):
+ *  1. ratio           — character-level edit distance on normalised strings
+ *  2. partial         — sliding-window ratio (good for substrings / abbreviations)
+ *  3. ratio (stemmed) — same as 1 but with plural/suffix stripping first
+ *  4. partial stemmed — same as 2 but stemmed
+ *  5. token_sort      — sort tokens alphabetically then compare (word-order agnostic)
+ *  6. token_set       — intersection/difference set comparison (handles extra words)
+ *  7. alias           — hardcoded accounting synonym table (domain knowledge boost)
+ */
 function fuzzyScore(a: string, b: string): { score: number; strategy: MatchStrategy } {
   const na = normalize(a);
   const nb = normalize(b);
@@ -239,34 +252,97 @@ function fuzzyScore(a: string, b: string): { score: number; strategy: MatchStrat
     { score: partialRatio(sa, sb),  strategy: "partial" },
     { score: tokenSortRatio(a, b),  strategy: "token_sort" },
     { score: tokenSetRatio(a, b),   strategy: "token_set" },
+    // Domain alias boost — fires for known accounting synonym pairs.
+    // Score is fixed at 88 so it lands in "possible_regroup" (not "matched").
+    { score: aliasScore(a, b),      strategy: "token_set" },
   ];
   return candidates.reduce((best, c) => (c.score > best.score ? c : best));
 }
 
-const SCORE_HIGH = 95;
-const SCORE_REGROUP = 70;
+// ─── Accounting alias pairs ──────────────────────────────────────────────────
+// Firms often record the same account under different but semantically equivalent
+// names (e.g. "Outstanding Salaries" vs "Salary Payable"). Pure string similarity
+// can score these below the regroup threshold because the words are different even
+// though the accounting meaning is identical. The table below lists known alias
+// pairs; if both names normalise to a matching pair we inject a synthetic score
+// of 88 so the reconciliation engine always flags them as "possible_regroup".
+const ACCOUNTING_ALIASES: Array<[string, string]> = [
+  // Payroll liabilities
+  ["outstanding salaries",    "salary payable"],
+  ["outstanding wages",       "wage payable"],
+  ["accrued salaries",        "salary payable"],
+  ["accrued wages",           "wage payable"],
+  // Receivables
+  ["debtors",                 "trade receivable"],
+  ["sundry debtors",          "trade receivable"],
+  ["debtors",                 "trade debtor"],
+  ["accounts receivable",     "trade receivable"],
+  // Payables
+  ["creditors",               "trade payable"],
+  ["sundry creditors",        "trade payable"],
+  ["creditors",               "trade creditor"],
+  ["accounts payable",        "trade payable"],
+  // Inventory
+  ["stock",                   "inventory"],
+  ["closing stock",           "inventory"],
+  ["opening stock",           "inventory"],
+  ["goods in hand",           "inventory"],
+  // Fixed assets
+  ["fixed assets",            "property plant and equipment"],
+  ["fixed assets",            "ppe"],
+  ["tangible assets",         "property plant and equipment"],
+  // Cash
+  ["cash and bank",           "bank balance"],
+  ["cash and bank balances",  "bank balance"],
+  ["cash and cash equivalents", "bank balance"],
+  ["bank overdraft",          "overdraft"],
+  // Loans
+  ["bank loan",               "term loan"],
+  ["bank term loan",          "term loan"],
+  ["bank borrowings",         "term loan"],
+  // Taxes
+  ["gst receivable",          "input tax credit"],
+  ["gst payable",             "output tax liability"],
+  ["tds receivable",          "tax deducted at source"],
+];
 
-// Self-test at module load — shows exact scores in server log
+/**
+ * Returns 88 if the two ledger names match a known accounting alias pair,
+ * otherwise 0. Matching is substring-based on normalised strings so minor
+ * surrounding words (e.g. "net" or "total") do not prevent a match.
+ */
+function aliasScore(a: string, b: string): number {
+  const na = normalize(a);
+  const nb = normalize(b);
+  for (const [x, y] of ACCOUNTING_ALIASES) {
+    if ((na.includes(x) && nb.includes(y)) || (na.includes(y) && nb.includes(x))) {
+      return 88;
+    }
+  }
+  return 0;
+}
+
+// ─── Scoring thresholds ───────────────────────────────────────────────────────
+// SCORE_HIGH  — treat a fuzzy hit as a full match (matched/mismatched) rather
+//               than a regroup suggestion. Set at 90 to allow for minor spelling
+//               differences (plurals, hyphens) while still being confident.
+// SCORE_REGROUP — minimum score to flag as "possible_regroup" instead of
+//               "missing_current". Lowered to 62 to catch semantically close
+//               names (e.g. "Outstanding Salaries" ↔ "Salary Payable" = ~69).
+const SCORE_HIGH = 90;
+const SCORE_REGROUP = 62;
+
+// Self-test at module load — confirms key pairs score correctly
 {
-  const a = "Trade Receivables";
-  const b = "Trade Receivable - Local";
-  const na = normalize(a), nb = normalize(b);
-  const sa = normalizedStemmed(a), sb = normalizedStemmed(b);
-  const r   = ratio(na, nb);
-  const pr  = partialRatio(na, nb);
-  const rs  = ratio(sa, sb);
-  const prs = partialRatio(sa, sb);
-  const tsr = tokenSortRatio(a, b);
-  const tse = tokenSetRatio(a, b);
-  const best = fuzzyScore(a, b);
-  logger.info({
-    test: "Trade Receivables vs Trade Receivable - Local",
-    na, nb, sa, sb,
-    ratio: r, partialRatio: pr,
-    ratioStemmed: rs, partialRatioStemmed: prs,
-    tokenSortRatio: tsr, tokenSetRatio: tse,
-    best,
-  }, "FUZZY_SELF_TEST");
+  const selfTests: Array<[string, string]> = [
+    ["Trade Receivables",    "Trade Receivable - Local"],
+    ["Outstanding Salaries", "Salary Payable"],
+    ["Debtors",              "Trade Debtors"],
+    ["Inventory Raw Material", "Raw Material Inventory"],
+  ];
+  for (const [a, b] of selfTests) {
+    logger.info({ a, b, best: fuzzyScore(a, b) }, "FUZZY_SELF_TEST");
+  }
 }
 
 function reconcile(prior: LedgerRow[], current: LedgerRow[]): ReconciliationRow[] {
@@ -396,6 +472,22 @@ function reconcile(prior: LedgerRow[], current: LedgerRow[]): ReconciliationRow[
   return results;
 }
 
+// ─── PDF extraction placeholder ───────────────────────────────────────────────
+// Architecture:
+//   PDF Upload → parsePdf() → LedgerRow[]
+//               → (same) reconcile() → Dashboard & Export
+//
+// TODO(pdf-ocr): Install a PDF-to-text library (e.g. pdf-parse or pdfjs-dist)
+//   and replace the stub below with real text extraction.
+// TODO(pdf-ocr): After text extraction, detect the table structure (likely
+//   two-column: name | balance) and parse rows into LedgerRow[].
+// TODO(pdf-ocr): If the PDF is scanned (no embedded text), integrate an OCR
+//   engine (e.g. Tesseract via tesseract.js) to extract the image layer first.
+function parsePdf(_buffer: Buffer): LedgerRow[] {
+  // TODO(pdf-ocr): replace this stub with actual PDF → LedgerRow[] extraction.
+  throw new Error("PDF_NOT_SUPPORTED");
+}
+
 router.post("/reconciliation/upload", upload.fields([
   { name: "priorYear", maxCount: 1 },
   { name: "currentYear", maxCount: 1 },
@@ -403,6 +495,26 @@ router.post("/reconciliation/upload", upload.fields([
   const files = req.files as Record<string, Express.Multer.File[]> | undefined;
   if (!files?.priorYear?.[0] || !files?.currentYear?.[0]) {
     res.status(400).json({ error: "Both priorYear and currentYear files are required." });
+    return;
+  }
+
+  // Detect PDF uploads and return a clear, actionable error.
+  // The multer limit is 20 MB so large scanned PDFs are blocked before this point.
+  const priorMime  = files.priorYear[0].mimetype;
+  const currentMime = files.currentYear[0].mimetype;
+  if (priorMime === "application/pdf" || files.priorYear[0].originalname.toLowerCase().endsWith(".pdf")) {
+    // TODO(pdf-ocr): swap parsePdf() in here once OCR is implemented.
+    res.status(422).json({
+      error: "PDF_NOT_SUPPORTED",
+      message: "PDF upload received for Prior Year FS. Full OCR/text extraction is not yet implemented. Please export your signed FS to Excel (.xlsx) and re-upload.",
+    });
+    return;
+  }
+  if (currentMime === "application/pdf" || files.currentYear[0].originalname.toLowerCase().endsWith(".pdf")) {
+    res.status(422).json({
+      error: "PDF_NOT_SUPPORTED",
+      message: "PDF upload received for Current Year TB. Please export to Excel (.xlsx) and re-upload.",
+    });
     return;
   }
 

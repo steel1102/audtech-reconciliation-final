@@ -112,7 +112,14 @@ function ConfidenceBand({ score, strategy }: { score: number | null; strategy: M
   );
 }
 
-function FileDropZone({ label, file, onChange }: { label: string; file: File | null; onChange: (f: File) => void }) {
+function FileDropZone({
+  label, file, onChange, acceptPdf = false,
+}: {
+  label: string;
+  file: File | null;
+  onChange: (f: File) => void;
+  acceptPdf?: boolean;
+}) {
   const inputRef = useRef<HTMLInputElement>(null);
   const [dragging, setDragging] = useState(false);
 
@@ -123,6 +130,10 @@ function FileDropZone({ label, file, onChange }: { label: string; file: File | n
     if (f) onChange(f);
   }, [onChange]);
 
+  const isPdf = file?.name.toLowerCase().endsWith(".pdf");
+  const accept = acceptPdf ? ".xlsx,.xls,.csv,.pdf" : ".xlsx,.xls,.csv";
+  const hint   = acceptPdf ? "Excel, CSV, or PDF — click to browse" : "Drop Excel or CSV here, or click to browse";
+
   return (
     <div
       onClick={() => inputRef.current?.click()}
@@ -132,16 +143,23 @@ function FileDropZone({ label, file, onChange }: { label: string; file: File | n
       className={cn(
         "border-2 border-dashed rounded-xl p-6 cursor-pointer transition-all flex flex-col items-center gap-3 text-center",
         dragging ? "border-primary bg-primary/5" : "border-border hover:border-primary/50 hover:bg-accent/30",
-        file && "border-green-400 bg-green-50/30"
+        file && !isPdf && "border-green-400 bg-green-50/30",
+        isPdf && "border-amber-400 bg-amber-50/30"
       )}
     >
-      <input ref={inputRef} type="file" className="hidden" accept=".xlsx,.xls,.csv" onChange={(e) => e.target.files?.[0] && onChange(e.target.files[0])} />
+      <input ref={inputRef} type="file" className="hidden" accept={accept}
+        onChange={(e) => e.target.files?.[0] && onChange(e.target.files[0])} />
       {file ? (
         <>
-          <FileSpreadsheet className="w-8 h-8 text-green-600" />
+          <FileSpreadsheet className={cn("w-8 h-8", isPdf ? "text-amber-500" : "text-green-600")} />
           <div>
-            <p className="text-sm font-medium text-green-700">{file.name}</p>
+            <p className={cn("text-sm font-medium", isPdf ? "text-amber-700" : "text-green-700")}>{file.name}</p>
             <p className="text-xs text-muted-foreground mt-0.5">{(file.size / 1024).toFixed(1)} KB</p>
+            {isPdf && (
+              <p className="text-xs text-amber-600 mt-1 font-medium">
+                PDF support coming soon — OCR extraction not yet active
+              </p>
+            )}
           </div>
         </>
       ) : (
@@ -149,7 +167,7 @@ function FileDropZone({ label, file, onChange }: { label: string; file: File | n
           <Upload className="w-8 h-8 text-muted-foreground" />
           <div>
             <p className="text-sm font-semibold">{label}</p>
-            <p className="text-xs text-muted-foreground mt-0.5">Drop Excel or CSV here, or click to browse</p>
+            <p className="text-xs text-muted-foreground mt-0.5">{hint}</p>
           </div>
         </>
       )}
@@ -198,7 +216,10 @@ export default function Reconciliation() {
       fd.append("currentYear", currentFile);
       const res = await fetch("/api/reconciliation/upload", { method: "POST", body: fd });
       const data = await res.json();
-      if (!res.ok) throw new Error(data.error || "Upload failed");
+      if (!res.ok) {
+        // PDF_NOT_SUPPORTED returns a human-readable `message` field
+        throw new Error(data.message || data.error || "Upload failed");
+      }
       setResult(data);
       setFilterStatus("all");
     } catch (e: unknown) {
@@ -381,8 +402,8 @@ export default function Reconciliation() {
             <div className="text-center space-y-2">
               <h2 className="text-2xl font-bold">Upload Financial Files</h2>
               <p className="text-muted-foreground text-sm">
-                Upload your Prior Year Signed Financial Statements and Current Year Opening Trial Balance files (Excel or CSV).
-                The tool will automatically reconcile and identify matches, mismatches, and regroupings.
+                Upload your Prior Year Signed Financial Statements (Excel, CSV, or PDF) and Current Year Opening Trial Balance (Excel or CSV).
+                The tool will automatically reconcile and identify matches, mismatches, and possible regroupings.
               </p>
             </div>
 
@@ -394,7 +415,7 @@ export default function Reconciliation() {
                       <span className="w-5 h-5 rounded-full bg-muted text-xs flex items-center justify-center font-bold">1</span>
                       Prior Year Signed FS
                     </label>
-                    <FileDropZone label="Prior Year Signed FS" file={priorFile} onChange={setPriorFile} />
+                    <FileDropZone label="Prior Year Signed FS" file={priorFile} onChange={setPriorFile} acceptPdf />
                   </div>
                   <div className="space-y-2">
                     <label className="text-sm font-medium flex items-center gap-1.5">
