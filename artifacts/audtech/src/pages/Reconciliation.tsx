@@ -632,7 +632,7 @@ export default function Reconciliation() {
                         const hasCyOptions = availableCyRows.length > 0;
                         return (
                         <tr key={i} className={cn("border-b transition-colors hover:bg-muted/30", i % 2 === 0 ? "" : "bg-muted/10")}>
-                          <td className="px-4 py-2.5"><StatusBadge status={row.status} /></td>
+                          <td className="px-4 py-2.5"><StatusBadge status={row.status.replace(/_/g, " ").replace(/\b\w/g, c => c.toUpperCase())} /></td>
                           <td className="px-4 py-2.5 font-mono text-xs text-muted-foreground">{row.ledgerCode || "—"}</td>
                           <td className="px-4 py-2.5 font-medium max-w-xs">
                             <span className="truncate block" title={row.ledgerName}>{row.ledgerName}</span>
