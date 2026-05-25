@@ -13,6 +13,7 @@ interface ReconciliationRow {
   status: ReconciliationStatus;
   ledgerCode: string;
   ledgerName: string;
+  similarityScore?: number; 
   priorBalance: number;
   currentBalance: number;
   variance: number;

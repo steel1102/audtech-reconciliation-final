@@ -894,7 +894,7 @@ router.post("/reconciliation/export", async (req, res): Promise<void> => {
       "Variance",
       "Match Score (%)",
       "Matched With",
-      "Regroup / Match Reason",
+      "AI Match Reason",
     ];
     const rowToArray = (r: ReconciliationRow) => [
       r.status.replace(/_/g, " ").replace(/\b\w/g, (c) => c.toUpperCase()),
