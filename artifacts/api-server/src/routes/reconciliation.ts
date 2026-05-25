@@ -526,10 +526,22 @@ function reconcile(prior: LedgerRow[], current: LedgerRow[]): ReconciliationRow[
     const exactNameIdx = current.findIndex(
       (c, i) => normalize(c.ledgerName) === normalize(p.ledgerName) && !matchedCurrentIdx.has(i)
     );
-    if (exactNameIdx !== -1) {
+     
       const exactName = current[exactNameIdx];
+      const normalizedPrior = p.ledgerName
+        .toLowerCase()
+        .replace(/[^a-z0-9 ]/g, "")
+        .trim();
+
+      const normalizedCurrent = exactName.ledgerName
+        .toLowerCase()
+        .replace(/[^a-z0-9 ]/g, "")
+        .trim();
+       if (normalizedPrior === normalizedCurrent) {
       matchedCurrentIdx.add(exactNameIdx);
+         
       const variance = exactName.balance - p.balance;
+         
       results.push({
         status: Math.abs(variance) < 0.005 ? "matched" : "mismatched",
         ledgerCode: p.ledgerCode,
@@ -538,7 +550,8 @@ function reconcile(prior: LedgerRow[], current: LedgerRow[]): ReconciliationRow[
         currentBalance: exactName.balance,
         variance,
         matchScore: 100,
-        matchedWith: exactName.ledgerCode !== p.ledgerCode ? exactName.ledgerCode : null,
+        matchedWith: 
+          exactName.ledgerCode !== p.ledgerCode ? exactName.ledgerCode : null,
         matchStrategy: "exact_name",
         matchReason: null,
       });
