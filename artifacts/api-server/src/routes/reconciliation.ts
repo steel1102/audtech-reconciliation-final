@@ -273,8 +273,25 @@ function fuzzyScore(a: string, b: string): {
     // Score fixed at 88 so it always lands in "possible_regroup" (< SCORE_HIGH).
     { score: alias ? 88 : 0,        strategy: "token_set"  },
   ];
+  let confidencePenalty = 0;
+
+  const looksLikeNonLedger =
+    na.length < 5 ||
+    a.includes("statement") ||
+    a.includes("director") ||
+    a.includes("page") ||
+    a.includes("dated");
+
+  if (looksLikeNonLedger) {
+    confidencePenalty = 15;
+  }
+  
   const best = candidates.reduce((b, c) => (c.score > b.score ? c : b));
-  return { ...best, aliasMatch: alias };
+  return {
+    ...best,
+    score: Math.max(0, best.score - confidencePenalty),
+    aliasMatch: alias,
+  };
 }
 
 // ─── Financial synonym alias table ───────────────────────────────────────────
