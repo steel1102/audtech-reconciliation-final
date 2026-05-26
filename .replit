@@ -34,3 +34,6 @@ externalPort = 80
 [[ports]]
 localPort = 23203
 externalPort = 3000
+
+[nix]
+packages = ["lsof"]
