@@ -302,16 +302,6 @@ function fuzzyScore(a: string, b: string): {
     confidencePenalty = 40;
   }
 
-  const looksLikeNonLedger =
-    na.length < 5 ||
-    a.includes("statement") ||
-    a.includes("director") ||
-    a.includes("page") ||
-    a.includes("dated");
-
-  if (looksLikeNonLedger) {
-    confidencePenalty = 15;
-  }
   
   const best = candidates.reduce((b, c) => (c.score > b.score ? c : b));
   return {
