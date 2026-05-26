@@ -252,11 +252,14 @@ function tokenSetRatio(a: string, b: string): number {
 
 function isLikelyLedgerRow(name: string): boolean { return true;
 }
-function fuzzyScore(a: string, b: string): {
+async function fuzzyScore(
+  a: string,
+  b: string
+): Promise<{
   score: number;
-  strategy: MatchStrategy;
-  aliasMatch: [string, string, string] | null;
-} {
+ strategy: MatchStrategy;
+ aliasMatch: [string, string, string] | null;
+}> {
   const na = normalize(a);
   const nb = normalize(b);
   const sa = normalizedStemmed(a);
@@ -305,6 +308,9 @@ function fuzzyScore(a: string, b: string): {
 
   
   const best = candidates.reduce((b, c) => (c.score > b.score ? c : b));
+  const llmResult = await classifyLedgerName(a);
+
+  console.log("LLM RESULT:", a, llmResult);
   return {
     ...best,
     score: Math.max(0, best.score - confidencePenalty),
@@ -522,11 +528,11 @@ const SCORE_REGROUP = 62;
     ["Inventory Raw Material", "Raw Material Inventory"],
   ];
   for (const [a, b] of selfTests) {
-    logger.info({ a, b, best: fuzzyScore(a, b) }, "FUZZY_SELF_TEST");
+    logger.info({ a, b, best: await fuzzyScore(a, b) }, "FUZZY_SELF_TEST");
   }
 }
 
-function reconcile(prior: LedgerRow[], current: LedgerRow[]): ReconciliationRow[] {
+async function reconcile(prior: LedgerRow[], current: LedgerRow[]): Promise< ReconciliationRow[]> {
   const results: ReconciliationRow[] = [];
 
   console.log("PRIOR FS DATA:", prior.slice(0, 10));
@@ -889,7 +895,7 @@ router.post("/reconciliation/upload", upload.fields([
       return;
     }
 
-    const rows = reconcile(prior, current);
+    const rows = await reconcile(prior, current);
 
     const summary: ReconciliationSummary = {
       totalPrior: prior.reduce((s, r) => s + r.balance, 0),
