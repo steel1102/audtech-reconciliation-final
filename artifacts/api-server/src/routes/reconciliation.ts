@@ -580,6 +580,9 @@ const SCORE_REGROUP = 62;
 
 function reconcile(prior: LedgerRow[], current: LedgerRow[]): ReconciliationRow[] {
   const results: ReconciliationRow[] = [];
+
+  console.log("PRIOR FS DATA:", prior.slice(0, 10));
+  console.log("CURRENT TB DATA:", current.slice(0, 10));
   // Track by index — ledger codes are often empty or duplicated, so code-based
   // tracking would silently block valid candidates sharing the same code.
   const matchedCurrentIdx = new Set<number>();
