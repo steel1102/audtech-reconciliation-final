@@ -601,6 +601,31 @@ function reconcile(prior: LedgerRow[], current: LedgerRow[]): ReconciliationRow[
 
     // ── Pass 3: Fuzzy / alias matching ────────────────────────────────────
     // Score every unmatched CY entry; keep those above SCORE_REGROUP threshold.
+    const invalidLedgerTerms = [
+      "statement",
+      "financial position",
+      "director",
+      "dated",
+      "page",
+      "opening balance",
+      "report",
+      "independent auditor",
+      "1-jan",
+      "31-dec",
+      "particulars",
+      "2024",
+      "2023"
+    ];
+
+    const normalizedLedger = p.ledgerName.toLowerCase();
+
+    const isNonLedgerRow = invalidLedgerTerms.some(term =>
+      normalizedLedger.includes(term)
+    );
+
+    if (isNonLedgerRow) {
+      continue;
+    }
     const candidates = current
       .map((c, i) => ({ c, i, ...fuzzyScore(p.ledgerName, c.ledgerName) }))
       .filter((x) => !matchedCurrentIdx.has(x.i) && x.score >= SCORE_REGROUP)
