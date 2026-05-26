@@ -275,6 +275,30 @@ function fuzzyScore(a: string, b: string): {
   ];
   let confidencePenalty = 0;
 
+  const invalidLedgerTerms = [
+    "statement",
+    "financial position",
+    "director",
+    "dated",
+    "page",
+    "opening balance",
+    "report",
+    "independent auditor",
+    "1-jan",
+    "31-dec",
+    "particulars",
+    "2024",
+    "2023"
+  ];
+
+  const looksLikeNonLedger =
+    invalidLedgerTerms.some(term => a.includes(term)) ||
+    invalidLedgerTerms.some(term => b.includes(term));
+
+  if (looksLikeNonLedger) {
+    confidencePenalty = 40;
+  }
+
   const looksLikeNonLedger =
     na.length < 5 ||
     a.includes("statement") ||
