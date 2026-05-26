@@ -1,44 +1,47 @@
-import OpenAI from "openai";
+import { GoogleGenerativeAI } from "@google/generative-ai";
 
-const client = new OpenAI({
-  apiKey: process.env.OPENAI_API_KEY,
+const genAI = new GoogleGenerativeAI(
+  process.env.GEMINI_API_KEY || ""
+);
+
+const model = genAI.getGenerativeModel({
+  model: "gemini-1.5-flash",
 });
 
-export async function classifyLedgerName(name: string) {
+export async function classifyLedgerName(
+  ledgerName: string
+): Promise<string | null> {
   try {
+    console.log("LLM CALLED:", ledgerName);
+
     const prompt = `
 You are a financial reconciliation assistant.
 
-Determine whether this line item is:
-1. A real ledger/account item
-2. A report/narrative/non-ledger item
+Classify this ledger/account name into a short financial category.
 
-Return ONLY JSON.
+Ledger:
+"${ledgerName}"
 
 Examples:
-"Trade Receivables" -> ledger
-"Cash and Cash Equivalents" -> ledger
-"Director Report" -> non-ledger
-"Statement of Financial Position" -> non-ledger
+- Trade Debtors → receivable
+- Salary Payable → payable
+- Raw Material Inventory → inventory
+- Bank Charges → expense
+- GST Receivable → tax receivable
 
-Input:
-${name}
+Return ONLY the category name.
 `;
-console.log("LLM CALLED:", name);
-    const response = await client.chat.completions.create({
-      model: "gpt-4.1-mini",
-      messages: [
-        {
-          role: "user",
-          content: prompt,
-        },
-      ],
-      temperature: 0,
-    });
 
-    return response.choices[0].message.content;
-  } catch (err) {
-    console.error("LLM classification failed:", err);
+    const result = await model.generateContent(prompt);
+
+    const response = result.response.text();
+
+    console.log("LLM RESULT:", ledgerName, response);
+
+    return response;
+  } catch (error) {
+    console.error("LLM classification failed:", error);
+
     return null;
   }
 }
