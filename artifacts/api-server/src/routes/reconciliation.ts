@@ -125,6 +125,9 @@ function parseWorkbook(buffer: Buffer): LedgerRow[] {
       name.toLowerCase().includes("fs")
     ) || wb.SheetNames[0];
   const ws = wb.Sheets[sheetName];
+
+  console.log("Sheet Names :", wb.SheetNames);
+  console.log("Using sheet:", sheetName);
   const rows: any[][] = XLSX.utils.sheet_to_json(ws, {
     header: 1,
     defval: "",
@@ -151,6 +154,8 @@ function parseWorkbook(buffer: Buffer): LedgerRow[] {
     range: headerRowIndex,
     defval: "",
   });
+
+  console.log("Raw rows:", raw.slice(0, 10));
 
   const cleanedRaw = raw.filter((row: any) =>
     Object.values(row).some(v => String(v).trim() !== "")
