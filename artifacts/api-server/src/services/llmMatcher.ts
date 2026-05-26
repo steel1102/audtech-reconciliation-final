@@ -1,47 +1,72 @@
-import { GoogleGenerativeAI } from "@google/generative-ai";
+const ACCOUNT_ALIASES: Record<string, string[]> = {
+  "Inventory": [
+    "inventory",
+    "raw material",
+    "stock",
+    "closing stock"
+  ],
 
-const genAI = new GoogleGenerativeAI(
-  process.env.GEMINI_API_KEY || ""
-);
+  "Trade Receivables": [
+    "debtor",
+    "trade debtor",
+    "receivable",
+    "sundry debtor"
+  ],
 
-const model = genAI.getGenerativeModel({
-  model: "gemini-1.5-flash-latest",
-});
+  "Trade Payables": [
+    "creditor",
+    "trade creditor",
+    "payable",
+    "sundry creditor"
+  ],
+
+  "Cash and Bank": [
+    "cash",
+    "bank",
+    "hdfc",
+    "icici",
+    "sbi"
+  ],
+
+  "Salary Payable": [
+    "salary payable",
+    "outstanding salary",
+    "salary outstanding"
+  ],
+
+  "Fixed Assets": [
+    "plant",
+    "machinery",
+    "furniture",
+    "vehicle",
+    "equipment"
+  ]
+};
+
+function normalize(text: string): string {
+  return text.toLowerCase().trim();
+}
 
 export async function classifyLedgerName(
   ledgerName: string
 ): Promise<string | null> {
-  try {
-    console.log("LLM CALLED:", ledgerName);
 
-    const prompt = `
-You are a financial reconciliation assistant.
+  const normalized = normalize(ledgerName);
 
-Classify this ledger/account name into a short financial category.
+  for (const [category, aliases] of Object.entries(ACCOUNT_ALIASES)) {
 
-Ledger:
-"${ledgerName}"
+    for (const alias of aliases) {
 
-Examples:
-- Trade Debtors → receivable
-- Salary Payable → payable
-- Raw Material Inventory → inventory
-- Bank Charges → expense
-- GST Receivable → tax receivable
+      if (normalized.includes(normalize(alias))) {
 
-Return ONLY the category name.
-`;
+        console.log("LOCAL LLM MATCH:", ledgerName, "→", category);
 
-    const result = await model.generateContent(prompt);
-
-    const response = result.response.text();
-
-    console.log("LLM RESULT:", ledgerName, response);
-
-    return response;
-  } catch (error) {
-    console.error("LLM classification failed:", error);
-
-    return null;
+        return category;
+      }
+    }
   }
+
+  console.log("NO LOCAL MATCH:", ledgerName);
+
+  return ledgerName;
 }
