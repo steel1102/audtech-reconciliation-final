@@ -248,6 +248,52 @@ function tokenSetRatio(a: string, b: string): number {
  *  6. token_set       — intersection/difference set comparison (handles extra words)
  *  7. alias           — financial synonym table (domain knowledge boost, score=88)
  */
+
+function isLikelyLedgerRow(name: string): boolean {
+  const text = name.toLowerCase().trim();
+
+  const invalidTerms = [
+    "statement",
+    "financial position",
+    "director",
+    "dated",
+    "page",
+    "report",
+    "auditor",
+    "notes",
+    "independent auditor",
+    "for the year",
+    "particulars"
+  ];
+
+  // Reject known narrative/report terms
+  if (
+    invalidTerms.some(term =>
+      text.includes(term)
+    )
+  ) {
+    return false;
+  }
+
+  // Reject very short rows
+  if (text.length < 3) {
+    return false;
+  }
+
+  // Reject long narrative-like rows
+  if (text.length > 80) {
+    return false;
+  }
+
+  // Reject date-heavy rows
+  if (
+    /\b(2023|2024|2025)\b/.test(text)
+  ) {
+    return false;
+  }
+
+  return true;
+}
 function fuzzyScore(a: string, b: string): {
   score: number;
   strategy: MatchStrategy;
@@ -626,6 +672,10 @@ function reconcile(prior: LedgerRow[], current: LedgerRow[]): ReconciliationRow[
     if (isNonLedgerRow) {
       continue;
     }
+    if (!isLikelyLedgerRow(p.ledgerName)) {
+      continue;
+    }
+    
     const candidates = current
       .map((c, i) => ({ c, i, ...fuzzyScore(p.ledgerName, c.ledgerName) }))
       .filter((x) => !matchedCurrentIdx.has(x.i) && x.score >= SCORE_REGROUP)
