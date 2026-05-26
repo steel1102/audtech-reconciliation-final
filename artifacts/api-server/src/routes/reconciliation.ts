@@ -678,7 +678,11 @@ function reconcile(prior: LedgerRow[], current: LedgerRow[]): ReconciliationRow[
     
     const candidates = current
       .map((c, i) => ({ c, i, ...fuzzyScore(p.ledgerName, c.ledgerName) }))
-      .filter((x) => !matchedCurrentIdx.has(x.i) && x.score >= SCORE_REGROUP)
+      .filter((x) =>
+        !matchedCurrentIdx.has(x.i) &&
+        x.score >= SCORE_REGROUP &&
+        Math.abs(x.c.balance - p.balance) < 1000
+      )
       .sort((a, b) => b.score - a.score);
 
     if (candidates.length > 0) {
