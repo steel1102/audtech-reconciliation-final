@@ -117,18 +117,54 @@ function detectColumns(headers: string[], sample: Record<string, unknown>[]): {
 
 function parseWorkbook(buffer: Buffer): LedgerRow[] {
   const wb = XLSX.read(buffer, { type: "buffer" });
-  const sheetName = wb.SheetNames[0];
+  const sheetName =
+    wb.SheetNames.find(name =>
+      name.toLowerCase().includes("tb") ||
+      name.toLowerCase().includes("trial") ||
+      name.toLowerCase().includes("balance") ||
+      name.toLowerCase().includes("fs")
+    ) || wb.SheetNames[0];
   const ws = wb.Sheets[sheetName];
-  const raw: Record<string, unknown>[] = XLSX.utils.sheet_to_json(ws, { defval: "" });
-  if (raw.length === 0) return [];
+  const rows: any[][] = XLSX.utils.sheet_to_json(ws, {
+    header: 1,
+    defval: "",
+  });
 
-  const headers = Object.keys(raw[0]);
-  const sample = raw.slice(0, Math.min(10, raw.length));
+  let headerRowIndex = 0;
+
+  for (let i = 0; i < rows.length; i++) {
+    const rowText = rows[i].join(" ").toLowerCase();
+
+    if (
+      rowText.includes("account") ||
+      rowText.includes("ledger") ||
+      rowText.includes("particular") ||
+      rowText.includes("description") ||
+      rowText.includes("name")
+    ) {
+      headerRowIndex = i;
+      break;
+    }
+  }
+
+  const raw: Record<string, unknown>[] = XLSX.utils.sheet_to_json(ws, {
+    range: headerRowIndex,
+    defval: "",
+  });
+
+  const cleanedRaw = raw.filter((row: any) =>
+    Object.values(row).some(v => String(v).trim() !== "")
+  );
+
+  if (cleanedRaw.length === 0) return [];
+
+  const headers = Object.keys(cleanedRaw[0]);
+  const sample = cleanedRaw.slice(0, Math.min(10, cleanedRaw.length));
   const { codeKey, nameKey, debitKey, creditKey, balanceKey } = detectColumns(headers, sample);
 
   logger.info({ headers, codeKey, nameKey, debitKey, creditKey, balanceKey }, "COLUMN_DETECTION");
 
-  const rows: LedgerRow[] = [];
+  const ledgerRows: LedgerRow[] = [];
   for (const row of raw) {
     const code = codeKey ? String(row[codeKey] ?? "").trim() : "";
     const name = String(row[nameKey] ?? "").trim();
@@ -143,10 +179,10 @@ function parseWorkbook(buffer: Buffer): LedgerRow[] {
       balance = parseFloat(String(row[balanceKey]).replace(/,/g, "")) || 0;
     }
 
-    rows.push({ ledgerCode: code, ledgerName: name, balance });
+    ledgerRows.push({ ledgerCode: code, ledgerName: name, balance });
   }
 
-  return rows;
+  return ledgerRows;
 }
 
 function normalize(s: string): string {
@@ -633,12 +669,27 @@ async function reconcile(prior: LedgerRow[], current: LedgerRow[]): Promise< Rec
       continue;
     }
     
-    const candidates = current
-      .map((c, i) => ({ c, i, ...fuzzyScore(p.ledgerName, c.ledgerName) }))
-      .filter((x) =>
-        !matchedCurrentIdx.has(x.i) &&
-        x.score >= SCORE_REGROUP &&
-        Math.abs(x.c.balance - p.balance) < 1000
+      const candidateResults = await Promise.all(
+      current.map(async (c, i) => {
+      const scoreResult = await fuzzyScore(
+      p.ledgerName,
+      c.ledgerName
+      );
+
+      return {
+      c,
+      i,
+      ...scoreResult,
+      };
+      })
+      );
+
+      const candidates = candidateResults
+      .filter(
+      (x) =>
+      !matchedCurrentIdx.has(x.i) &&
+      x.score >= SCORE_REGROUP &&
+      Math.abs(x.c.balance - p.balance) < 1000
       )
       .sort((a, b) => b.score - a.score);
 
@@ -647,7 +698,7 @@ async function reconcile(prior: LedgerRow[], current: LedgerRow[]): Promise< Rec
       matchedCurrentIdx.add(best.i);
       const variance = best.c.balance - p.balance;
 
-      if (best.score >= SCORE_HIGH) {
+      if ((best).score >= SCORE_HIGH) {
         // High-confidence fuzzy hit → treated as matched/mismatched, not regroup
         results.push({
           status: Math.abs(variance) < 0.005 ? "matched" : "mismatched",
@@ -682,12 +733,24 @@ async function reconcile(prior: LedgerRow[], current: LedgerRow[]): Promise< Rec
       }
     } else {
       // No candidate above threshold — log top-3 near-misses for diagnostics
-      const topMisses = current
-        .map((c, i) => ({ name: c.ledgerName, code: c.ledgerCode, i, ...fuzzyScore(p.ledgerName, c.ledgerName) }))
-        .filter((x) => !matchedCurrentIdx.has(x.i))
-        .sort((a, b) => b.score - a.score)
-        .slice(0, 3)
-        .map((x) => ({ name: x.name, score: x.score, strategy: x.strategy }));
+      const scoredCandidates = await Promise.all(
+      current.map(async (c, i) => ({
+      name: c.ledgerName,
+      code: c.ledgerCode,
+      i,
+      ...(await fuzzyScore(p.ledgerName, c.ledgerName)),
+      }))
+      );
+
+      const topMisses = scoredCandidates
+      .filter((x) => !matchedCurrentIdx.has(x.i))
+      .sort((a, b) => b.score - a.score)
+      .slice(0, 3)
+      .map((x) => ({
+      name: x.name,
+      score: x.score,
+      strategy: x.strategy,
+      }));
       logger.info({ priorName: p.ledgerName, priorCode: p.ledgerCode, topMisses }, "UNMATCHED_ENTRY");
       results.push({
         status: "missing_current",
