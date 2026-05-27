@@ -115,80 +115,105 @@ function detectColumns(headers: string[], sample: Record<string, unknown>[]): {
   };
 }
 
-function parseWorkbook(buffer: Buffer): LedgerRow[] {
-  const wb = XLSX.read(buffer, { type: "buffer" });
-  const sheetName =
-    wb.SheetNames.find(name =>
-      name.toLowerCase().includes("tb") ||
-      name.toLowerCase().includes("trial") ||
-      name.toLowerCase().includes("balance") ||
-      name.toLowerCase().includes("fs")
-    ) || wb.SheetNames[0];
-  const ws = wb.Sheets[sheetName];
+ function parseWorkbook(buffer: Buffer): LedgerRow[] {
+   const wb = XLSX.read(buffer, { type: "buffer" });
 
-  console.log("Sheet Names :", wb.SheetNames);
-  console.log("Using sheet:", sheetName);
-  const rows: any[][] = XLSX.utils.sheet_to_json(ws, {
-    header: 1,
-    defval: "",
-  });
+   const sheetName =
+     wb.SheetNames.find(name =>
+       name.toLowerCase().includes("tb") ||
+       name.toLowerCase().includes("trial") ||
+       name.toLowerCase().includes("balance") ||
+       name.toLowerCase().includes("fs")
+     ) || wb.SheetNames[0];
 
-  let headerRowIndex = 0;
+   if (!sheetName) {
+     throw new Error("No worksheet found");
+   }
 
-  for (let i = 0; i < rows.length; i++) {
-    const rowText = rows[i].join(" ").toLowerCase();
+   const ws = wb.Sheets[sheetName];
 
-    if (
-      rowText.includes("account") ||
-      rowText.includes("ledger") ||
-      rowText.includes("particular") ||
-      rowText.includes("description") ||
-      rowText.includes("name")
-    ) {
-      headerRowIndex = i;
-      break;
-    }
-  }
+   if (!ws) {
+     throw new Error("Worksheet could not be loaded");
+   }
 
-  const raw: Record<string, unknown>[] = XLSX.utils.sheet_to_json(ws, {
-    range: headerRowIndex,
-    defval: "",
-  });
+   const rows: any[][] = XLSX.utils.sheet_to_json(ws, {
+     header: 1,
+     defval: "",
+   });
 
-  console.log("Raw rows:", raw.slice(0, 10));
+   const headers = (rows[0] || []) as string[];
+   const raw = rows.slice(1) as any[][];
 
-  const cleanedRaw = raw.filter((row: any) =>
-    Object.values(row).some(v => String(v).trim() !== "")
-  );
+   const sample = raw.slice(0, 20);
 
-  if (cleanedRaw.length === 0) return [];
+   const {
+     codeKey,
+     nameKey,
+     debitKey,
+     creditKey,
+     balanceKey,
+   } = detectColumns(headers, sample as any);
 
-  const headers = Object.keys(cleanedRaw[0]);
-  const sample = cleanedRaw.slice(0, Math.min(10, cleanedRaw.length));
-  const { codeKey, nameKey, debitKey, creditKey, balanceKey } = detectColumns(headers, sample);
+   logger.info(
+     {
+       headers,
+       codeKey,
+       nameKey,
+       debitKey,
+       creditKey,
+       balanceKey,
+     },
+     "COLUMN_DETECTION"
+   );
 
-  logger.info({ headers, codeKey, nameKey, debitKey, creditKey, balanceKey }, "COLUMN_DETECTION");
+   const ledgerRows: LedgerRow[] = [];
 
-  const ledgerRows: LedgerRow[] = [];
-  for (const row of raw) {
-    const code = codeKey ? String(row[codeKey] ?? "").trim() : "";
-    const name = String(row[nameKey] ?? "").trim();
-    if (!name || isNumericValue(name)) continue; // skip rows where name looks like a number
+   for (const row of raw) {
+     const code =
+       typeof codeKey === "string"
+         ? String((row as any)[codeKey] ?? "").trim()
+         : "";
 
-    let balance: number;
-    if (debitKey && creditKey) {
-      const debit = parseFloat(String(row[debitKey]).replace(/,/g, "")) || 0;
-      const credit = parseFloat(String(row[creditKey]).replace(/,/g, "")) || 0;
-      balance = debit - credit;
-    } else {
-      balance = parseFloat(String(row[balanceKey]).replace(/,/g, "")) || 0;
-    }
+     const name =
+       typeof nameKey === "string"
+         ? String((row as any)[nameKey] ?? "").trim()
+         : "";
 
-    ledgerRows.push({ ledgerCode: code, ledgerName: name, balance });
-  }
+     if (!name || isNumericValue(name)) {
+       continue;
+     }
 
-  return ledgerRows;
-}
+     let balance = 0;
+
+     if (debitKey && creditKey) {
+       const debit =
+         parseFloat(
+           String((row as any)[debitKey] ?? "0").replace(/,/g, "")
+         ) || 0;
+
+       const credit =
+         parseFloat(
+           String((row as any)[creditKey] ?? "0").replace(/,/g, "")
+         ) || 0;
+
+       balance = debit - credit;
+     } else if (balanceKey) {
+       balance =
+         parseFloat(
+           String((row as any)[balanceKey] ?? "0").replace(/,/g, "")
+         ) || 0;
+     }
+
+     ledgerRows.push({
+       ledgerCode: code,
+       ledgerName: name,
+       balance,
+     });
+   }
+
+   return ledgerRows;
+ }
+          
 
 function normalize(s: string): string {
   return s
@@ -347,7 +372,7 @@ async function fuzzyScore(
     confidencePenalty = 40;
   }
 
-  
+
   const best = candidates.reduce((b, c) => (c.score > b.score ? c : b));
   const llmResult = await classifyLedgerName(a);
 
@@ -611,7 +636,7 @@ async function reconcile(prior: LedgerRow[], current: LedgerRow[]): Promise< Rec
     const exactNameIdx = current.findIndex(
       (c, i) => normalize(c.ledgerName) === normalize(p.ledgerName) && !matchedCurrentIdx.has(i)
     );
-     
+
       const exactName = current[exactNameIdx];
       const normalizedPrior = p.ledgerName
         .toLowerCase()
@@ -624,9 +649,9 @@ async function reconcile(prior: LedgerRow[], current: LedgerRow[]): Promise< Rec
         .trim();
        if (normalizedPrior === normalizedCurrent) {
       matchedCurrentIdx.add(exactNameIdx);
-         
+
       const variance = exactName.balance - p.balance;
-         
+
       results.push({
         status: Math.abs(variance) < 0.005 ? "matched" : "mismatched",
         ledgerCode: p.ledgerCode,
@@ -673,7 +698,7 @@ async function reconcile(prior: LedgerRow[], current: LedgerRow[]): Promise< Rec
     if (!isLikelyLedgerRow(p.ledgerName)) {
       continue;
     }
-    
+
       const candidateResults = await Promise.all(
       current.map(async (c, i) => {
       const scoreResult = await fuzzyScore(
@@ -1094,4 +1119,4 @@ router.post("/reconciliation/export", async (req, res): Promise<void> => {
   }
 });
 
-export default router;
+export default router
