@@ -1004,10 +1004,15 @@ router.post("/reconciliation/upload", upload.fields([
     lastResult = { summary, rows };
     req.log.info({ rowCount: rows.length }, "Reconciliation complete");
     res.json({ summary, rows });
-  } catch (err) {
-    req.log.error({ err }, "Error processing files");
-    res.status(400).json({ error: "Failed to parse one or both files. Ensure they are valid Excel or CSV files." });
-  }
+    } catch (err) {
+      console.error("FULL PARSE ERROR:", err);
+
+      req.log.error({ err }, "Error processing files");
+
+      res.status(400).json({
+        error: err instanceof Error ? err.message : "Unknown parsing error",
+      });
+    }
 });
 
 router.get("/reconciliation/result", async (_req, res): Promise<void> => {

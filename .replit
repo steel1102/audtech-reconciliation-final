@@ -25,15 +25,12 @@ externalPort = 3001
 
 [[ports]]
 localPort = 8080
-externalPort = 8080
 
 [[ports]]
 localPort = 8081
-externalPort = 80
 
 [[ports]]
 localPort = 23203
-externalPort = 3000
 
 [nix]
 packages = ["lsof"]
